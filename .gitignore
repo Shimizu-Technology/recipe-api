@@ -1,0 +1,41 @@
+# Environment
+.env
+.env.local
+venv/
+.venv/
+
+# uv
+uv.lock
+.python-version
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temp files
+*.tmp
+*.temp
+temp_audio/
+downloads/
+
+# OS
+.DS_Store
+Thumbs.db
+

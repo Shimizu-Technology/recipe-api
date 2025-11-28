@@ -1,0 +1,29 @@
+# Production dependencies for Render deployment
+# Keep in sync with pyproject.toml
+# To regenerate: uv pip compile pyproject.toml -o requirements.txt
+
+# FastAPI & Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+
+# Database
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.30.0
+greenlet>=3.0.0
+
+# Validation & Settings
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# OpenAI
+openai>=1.50.0
+
+# Video Processing
+yt-dlp>=2024.11.0
+
+# HTTP Client
+httpx>=0.28.0
+
+# Environment
+python-dotenv>=1.0.0
