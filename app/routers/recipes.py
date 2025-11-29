@@ -50,6 +50,7 @@ def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
 async def get_my_recipes(
     limit: int = Query(default=50, le=100, description="Max recipes to return"),
     offset: int = Query(default=0, ge=0, description="Number of recipes to skip"),
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
@@ -58,13 +59,15 @@ async def get_my_recipes(
     
     Requires authentication.
     """
-    result = await db.execute(
-        select(Recipe)
-        .where(Recipe.user_id == user.id)
-        .order_by(Recipe.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    query = select(Recipe).where(Recipe.user_id == user.id)
+    
+    # Apply source_type filter if provided
+    if source_type and source_type != 'all':
+        query = query.where(Recipe.source_type == source_type)
+    
+    query = query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
+    
+    result = await db.execute(query)
     recipes = result.scalars().all()
     
     return [recipe_to_list_item(r) for r in recipes]
@@ -74,6 +77,7 @@ async def get_my_recipes(
 async def get_public_recipes(
     limit: int = Query(default=50, le=100, description="Max recipes to return"),
     offset: int = Query(default=0, ge=0, description="Number of recipes to skip"),
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     db: AsyncSession = Depends(get_db),
     user: Optional[ClerkUser] = Depends(get_optional_user),
 ):
@@ -82,13 +86,15 @@ async def get_public_recipes(
     
     Works with or without authentication.
     """
-    result = await db.execute(
-        select(Recipe)
-        .where(Recipe.is_public == True)
-        .order_by(Recipe.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    query = select(Recipe).where(Recipe.is_public == True)
+    
+    # Apply source_type filter if provided
+    if source_type and source_type != 'all':
+        query = query.where(Recipe.source_type == source_type)
+    
+    query = query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
+    
+    result = await db.execute(query)
     recipes = result.scalars().all()
     
     return [recipe_to_list_item(r) for r in recipes]
@@ -96,27 +102,33 @@ async def get_public_recipes(
 
 @router.get("/count")
 async def get_recipe_count(
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
     """Get total number of user's recipes."""
-    result = await db.execute(
-        select(func.count(Recipe.id))
-        .where(Recipe.user_id == user.id)
-    )
+    query = select(func.count(Recipe.id)).where(Recipe.user_id == user.id)
+    
+    if source_type and source_type != 'all':
+        query = query.where(Recipe.source_type == source_type)
+    
+    result = await db.execute(query)
     count = result.scalar()
     return {"count": count or 0}
 
 
 @router.get("/discover/count")
 async def get_public_recipe_count(
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get total number of public recipes."""
-    result = await db.execute(
-        select(func.count(Recipe.id))
-        .where(Recipe.is_public == True)
-    )
+    query = select(func.count(Recipe.id)).where(Recipe.is_public == True)
+    
+    if source_type and source_type != 'all':
+        query = query.where(Recipe.source_type == source_type)
+    
+    result = await db.execute(query)
     count = result.scalar()
     return {"count": count or 0}
 
@@ -125,6 +137,7 @@ async def get_public_recipe_count(
 async def search_recipes(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(default=20, le=50),
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
@@ -133,16 +146,23 @@ async def search_recipes(
     """
     search_term = f"%{q.lower()}%"
     
+    # Build base conditions
+    conditions = [
+        Recipe.user_id == user.id,
+        or_(
+            func.lower(Recipe.extracted["title"].astext).like(search_term),
+            Recipe.extracted["tags"].astext.ilike(search_term),
+            func.lower(Recipe.source_url).like(search_term),
+        )
+    ]
+    
+    # Add source_type filter if provided
+    if source_type and source_type != 'all':
+        conditions.append(Recipe.source_type == source_type)
+    
     result = await db.execute(
         select(Recipe)
-        .where(
-            Recipe.user_id == user.id,
-            or_(
-                func.lower(Recipe.extracted["title"].astext).like(search_term),
-                Recipe.extracted["tags"].astext.ilike(search_term),
-                func.lower(Recipe.source_url).like(search_term),
-            )
-        )
+        .where(*conditions)
         .order_by(Recipe.created_at.desc())
         .limit(limit)
     )
@@ -155,6 +175,7 @@ async def search_recipes(
 async def search_public_recipes(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(default=20, le=50),
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -162,16 +183,23 @@ async def search_public_recipes(
     """
     search_term = f"%{q.lower()}%"
     
+    # Build base conditions
+    conditions = [
+        Recipe.is_public == True,
+        or_(
+            func.lower(Recipe.extracted["title"].astext).like(search_term),
+            Recipe.extracted["tags"].astext.ilike(search_term),
+            func.lower(Recipe.source_url).like(search_term),
+        )
+    ]
+    
+    # Add source_type filter if provided
+    if source_type and source_type != 'all':
+        conditions.append(Recipe.source_type == source_type)
+    
     result = await db.execute(
         select(Recipe)
-        .where(
-            Recipe.is_public == True,
-            or_(
-                func.lower(Recipe.extracted["title"].astext).like(search_term),
-                Recipe.extracted["tags"].astext.ilike(search_term),
-                func.lower(Recipe.source_url).like(search_term),
-            )
-        )
+        .where(*conditions)
         .order_by(Recipe.created_at.desc())
         .limit(limit)
     )
