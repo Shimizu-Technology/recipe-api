@@ -33,6 +33,13 @@ class Recipe(Base):
     has_audio_transcript = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
+    # User ownership (Clerk user ID) - nullable for legacy recipes
+    user_id = Column(String(64), nullable=True, index=True)
+    
+    # Public visibility - True means visible in Discover feed
+    # Legacy recipes (user_id=NULL) are public by default
+    is_public = Column(Boolean, nullable=False, default=False, server_default="false")
+    
     # Relationship to extraction jobs
     extraction_jobs = relationship("ExtractionJob", back_populates="recipe")
     

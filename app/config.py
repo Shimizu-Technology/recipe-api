@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
     
+    # Clerk Auth
+    clerk_secret_key: str | None = None
+    clerk_frontend_api: str = "clerk.your-domain.com"  # e.g., "prepared-mole-42.clerk.accounts.dev"
+    
     # AWS S3 (for thumbnail storage)
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None

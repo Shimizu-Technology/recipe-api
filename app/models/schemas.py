@@ -106,6 +106,8 @@ class RecipeResponse(BaseModel):
     extraction_quality: Optional[str] = None
     has_audio_transcript: bool = False
     created_at: datetime
+    user_id: Optional[str] = None
+    is_public: bool = False
     
     class Config:
         from_attributes = True
@@ -124,6 +126,8 @@ class RecipeListItem(BaseModel):
     servings: Optional[int] = None
     total_time: Optional[str] = None
     created_at: datetime
+    user_id: Optional[str] = None
+    is_public: bool = False
     
     class Config:
         from_attributes = True

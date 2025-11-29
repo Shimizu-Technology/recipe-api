@@ -12,6 +12,7 @@ from app.db import get_db
 from app.models.recipe import Recipe, ExtractionJob
 from app.services import recipe_extractor, video_service, storage_service
 from app.services.extractor import ExtractionProgress
+from app.auth import get_current_user, ClerkUser
 
 router = APIRouter(prefix="/api", tags=["extraction"])
 
@@ -23,6 +24,7 @@ class ExtractRequest(BaseModel):
     location: str = "Guam"
     notes: str = ""
     quick_check: bool = False  # If true, only check for existing
+    is_public: bool = True  # Public by default - shared to library
 
 
 class ExtractResponse(BaseModel):
@@ -52,20 +54,24 @@ _jobs: dict[str, dict] = {}
 @router.post("/extract", response_model=ExtractResponse)
 async def extract_recipe(
     request: ExtractRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
 ):
     """
     Extract a recipe from a video URL.
     
     Supports TikTok, YouTube, and Instagram videos.
     
-    If a recipe with this URL already exists, returns the existing recipe.
+    If the user already has a recipe with this URL, returns the existing recipe.
     """
     url = request.url.strip()
     
-    # Check for existing recipe
+    # Check for existing recipe FROM THIS USER
     result = await db.execute(
-        select(Recipe).where(Recipe.source_url == url)
+        select(Recipe).where(
+            Recipe.source_url == url,
+            Recipe.user_id == user.id
+        )
     )
     existing = result.scalar_one_or_none()
     
@@ -104,7 +110,7 @@ async def extract_recipe(
             detail=f"Extraction failed: {extraction_result.error}"
         )
     
-    # Save to database (initially with external thumbnail URL)
+    # Save to database with user_id
     new_recipe = Recipe(
         source_url=url,
         source_type=platform,
@@ -114,6 +120,8 @@ async def extract_recipe(
         extraction_method=extraction_result.extraction_method,
         extraction_quality=extraction_result.extraction_quality,
         has_audio_transcript=extraction_result.has_audio_transcript,
+        user_id=user.id,  # Assign to current user
+        is_public=request.is_public,  # Public by default, user can opt out
     )
     
     db.add(new_recipe)
@@ -146,7 +154,8 @@ async def extract_recipe(
 async def start_extraction_job(
     request: ExtractRequest,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
 ):
     """
     Start an async extraction job.
@@ -155,9 +164,12 @@ async def start_extraction_job(
     """
     url = request.url.strip()
     
-    # Check for existing recipe
+    # Check for existing recipe FROM THIS USER
     result = await db.execute(
-        select(Recipe).where(Recipe.source_url == url)
+        select(Recipe).where(
+            Recipe.source_url == url,
+            Recipe.user_id == user.id
+        )
     )
     existing = result.scalar_one_or_none()
     
@@ -187,13 +199,15 @@ async def start_extraction_job(
     db.add(job)
     await db.commit()
     
-    # Start background task
+    # Start background task WITH USER ID
     background_tasks.add_task(
         run_extraction_job,
         job_id=job_id,
         url=url,
         location=request.location,
-        notes=request.notes
+        notes=request.notes,
+        user_id=user.id,  # Pass user ID to background task
+        is_public=request.is_public  # Pass public setting
     )
     
     return {
@@ -207,7 +221,9 @@ async def run_extraction_job(
     job_id: str,
     url: str,
     location: str,
-    notes: str
+    notes: str,
+    user_id: str,  # User ID for the recipe
+    is_public: bool = True  # Public by default
 ):
     """Background task to run extraction."""
     from app.db.database import AsyncSessionLocal
@@ -247,7 +263,7 @@ async def run_extraction_job(
                 return
             
             if result.success:
-                # Save recipe
+                # Save recipe WITH USER ID
                 new_recipe = Recipe(
                     source_url=url,
                     source_type=platform,
@@ -257,6 +273,8 @@ async def run_extraction_job(
                     extraction_method=result.extraction_method,
                     extraction_quality=result.extraction_quality,
                     has_audio_transcript=result.has_audio_transcript,
+                    user_id=user_id,  # Assign to user
+                    is_public=is_public,  # Public by default, user can opt out
                 )
                 db.add(new_recipe)
                 await db.commit()
@@ -321,7 +339,8 @@ async def run_extraction_job(
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(
     job_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
 ):
     """Get the status of an extraction job."""
     result = await db.execute(
@@ -360,4 +379,3 @@ async def get_available_locations():
         ],
         "default": "Guam"
     }
-
