@@ -25,5 +25,8 @@ yt-dlp>=2024.11.0
 # HTTP Client
 httpx>=0.28.0
 
+# AWS S3
+boto3>=1.35.0
+
 # Environment
 python-dotenv>=1.0.0

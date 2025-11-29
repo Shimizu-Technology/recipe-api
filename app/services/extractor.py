@@ -205,12 +205,8 @@ class RecipeExtractor:
         if recipe:
             recipe["media"] = {"thumbnail": thumbnail_url}
         
-        if progress_callback:
-            await progress_callback(ExtractionProgress(
-                step="complete",
-                progress=100,
-                message="Recipe extracted successfully!"
-            ))
+        # Note: Don't send "complete" here - let the router handle that
+        # after S3 upload is done to avoid progress going backwards
         
         return FullExtractionResult(
             success=True,

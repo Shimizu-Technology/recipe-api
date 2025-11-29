@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
     
+    # AWS S3 (for thumbnail storage)
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    aws_region: str = "us-east-1"
+    s3_bucket_name: str | None = None
+    
     # Optional
     ig_oembed_token: str | None = None
     
@@ -20,6 +26,15 @@ class Settings(BaseSettings):
     # API Settings
     api_title: str = "Recipe Extractor API"
     api_version: str = "1.0.0"
+    
+    @property
+    def s3_enabled(self) -> bool:
+        """Check if S3 is configured."""
+        return all([
+            self.aws_access_key_id,
+            self.aws_secret_access_key,
+            self.s3_bucket_name
+        ])
     
     class Config:
         env_file = ".env"

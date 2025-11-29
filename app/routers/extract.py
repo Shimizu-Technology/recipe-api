@@ -10,7 +10,8 @@ from datetime import datetime
 
 from app.db import get_db
 from app.models.recipe import Recipe, ExtractionJob
-from app.services import recipe_extractor, video_service
+from app.services import recipe_extractor, video_service, storage_service
+from app.services.extractor import ExtractionProgress
 
 router = APIRouter(prefix="/api", tags=["extraction"])
 
@@ -103,7 +104,7 @@ async def extract_recipe(
             detail=f"Extraction failed: {extraction_result.error}"
         )
     
-    # Save to database
+    # Save to database (initially with external thumbnail URL)
     new_recipe = Recipe(
         source_url=url,
         source_type=platform,
@@ -118,6 +119,21 @@ async def extract_recipe(
     db.add(new_recipe)
     await db.commit()
     await db.refresh(new_recipe)
+    
+    # Upload thumbnail to S3 for permanent storage
+    if extraction_result.thumbnail_url:
+        s3_url = await storage_service.upload_thumbnail_from_url(
+            extraction_result.thumbnail_url,
+            str(new_recipe.id)
+        )
+        if s3_url:
+            # Update recipe with S3 URL
+            new_recipe.thumbnail_url = s3_url
+            # Also update the media field in extracted JSON
+            if new_recipe.extracted and "media" in new_recipe.extracted:
+                new_recipe.extracted["media"]["thumbnail"] = s3_url
+            await db.commit()
+            await db.refresh(new_recipe)
     
     return ExtractResponse(
         id=new_recipe.id,
@@ -246,7 +262,31 @@ async def run_extraction_job(
                 await db.commit()
                 await db.refresh(new_recipe)
                 
-                # Update job as completed
+                # Upload thumbnail to S3 for permanent storage
+                if result.thumbnail_url:
+                    await update_progress(ExtractionProgress(
+                        step="saving",
+                        progress=85,
+                        message="Saving thumbnail..."
+                    ))
+                    s3_url = await storage_service.upload_thumbnail_from_url(
+                        result.thumbnail_url,
+                        str(new_recipe.id)
+                    )
+                    if s3_url:
+                        # Update recipe with S3 URL
+                        new_recipe.thumbnail_url = s3_url
+                        if new_recipe.extracted and "media" in new_recipe.extracted:
+                            new_recipe.extracted["media"]["thumbnail"] = s3_url
+                        await db.commit()
+                
+                # Update job as completed (only NOW, after everything is done)
+                await update_progress(ExtractionProgress(
+                    step="complete",
+                    progress=100,
+                    message="Recipe extracted successfully!"
+                ))
+                
                 job.status = "completed"
                 job.progress = 100
                 job.current_step = "complete"
