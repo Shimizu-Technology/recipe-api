@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import recipes_router, health_router, extract_router, grocery_router
+from app.routers import recipes_router, health_router, extract_router, grocery_router, chat_router
 
 settings = get_settings()
 
@@ -37,6 +37,7 @@ app.include_router(health_router)
 app.include_router(recipes_router)
 app.include_router(extract_router)
 app.include_router(grocery_router)
+app.include_router(chat_router)
 
 
 @app.get("/")
