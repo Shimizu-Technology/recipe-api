@@ -52,6 +52,60 @@ class VideoService:
         return "web"
     
     @staticmethod
+    async def normalize_url(url: str) -> str:
+        """
+        Normalize a video URL to a canonical form for duplicate detection.
+        
+        TikTok short URLs (tiktok.com/t/xxxxx) redirect to different URLs each time
+        they're shared, so we need to resolve them to the full video URL.
+        
+        YouTube and Instagram URLs are generally stable.
+        """
+        url = url.strip()
+        platform = VideoService.detect_platform(url)
+        
+        if platform == "tiktok":
+            # TikTok short URLs need to be resolved
+            if "/t/" in url or "vm.tiktok.com" in url:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                        response = await client.head(url)
+                        resolved_url = str(response.url)
+                        print(f"🔗 Resolved TikTok URL: {url} → {resolved_url}")
+                        
+                        # Clean up query params but keep the full path with username
+                        # e.g., https://www.tiktok.com/@user/video/123?_r=1 -> https://www.tiktok.com/@user/video/123
+                        if '?' in resolved_url:
+                            resolved_url = resolved_url.split('?')[0]
+                        
+                        return resolved_url
+                except Exception as e:
+                    print(f"⚠️ Failed to resolve TikTok URL: {e}")
+                    return url
+            else:
+                # Already a full URL, just clean up query params
+                if '?' in url:
+                    url = url.split('?')[0]
+                return url
+        
+        elif platform == "youtube":
+            # Normalize YouTube URLs to a standard format
+            video_id = VideoService.extract_youtube_id(url)
+            if video_id:
+                return f"https://www.youtube.com/watch?v={video_id}"
+        
+        # For other platforms, return as-is
+        return url
+    
+    @staticmethod
+    def extract_tiktok_video_id(url: str) -> Optional[str]:
+        """Extract video ID from a TikTok URL for duplicate matching."""
+        video_id_match = re.search(r'/video/(\d+)', url)
+        if video_id_match:
+            return video_id_match.group(1)
+        return None
+    
+    @staticmethod
     def extract_youtube_id(url: str) -> Optional[str]:
         """Extract video ID from YouTube URL."""
         patterns = [

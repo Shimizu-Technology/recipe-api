@@ -1,27 +1,75 @@
 """Recipe API endpoints - CRUD operations with user authentication."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 from pydantic import BaseModel
 from uuid import UUID
-from typing import Optional
+from typing import Optional, List
+import json
 
 from app.db import get_db
-from app.models.recipe import Recipe
+from app.models.recipe import Recipe, SavedRecipe
 from app.models.schemas import RecipeResponse, RecipeListItem
 from app.auth import get_current_user, get_optional_user, ClerkUser
+from app.services.storage import storage_service
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
 
 
 class RecipeUpdate(BaseModel):
-    """Request to update a recipe."""
+    """Request to update a recipe (partial update - old style)."""
     title: Optional[str] = None
     servings: Optional[int] = None
     notes: Optional[str] = None
     tags: Optional[list[str]] = None
     is_public: Optional[bool] = None
+
+
+class RecipeEdit(BaseModel):
+    """Full recipe edit request."""
+    title: str
+    servings: Optional[int] = None
+    prep_time: Optional[str] = None
+    cook_time: Optional[str] = None
+    total_time: Optional[str] = None
+    ingredients: List["ManualIngredient"]
+    steps: List[str]
+    notes: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_public: Optional[bool] = None
+    nutrition: Optional["ManualNutrition"] = None
+
+
+class ManualIngredient(BaseModel):
+    """Ingredient for manual recipe entry."""
+    name: str
+    quantity: Optional[str] = None
+    unit: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ManualNutrition(BaseModel):
+    """Nutrition data for manual recipe entry."""
+    calories: Optional[int] = None
+    protein: Optional[int] = None
+    carbs: Optional[int] = None
+    fat: Optional[int] = None
+
+
+class ManualRecipeCreate(BaseModel):
+    """Request to create a manual recipe."""
+    title: str
+    servings: Optional[int] = None
+    prep_time: Optional[str] = None
+    cook_time: Optional[str] = None
+    total_time: Optional[str] = None
+    ingredients: List[ManualIngredient]
+    steps: List[str]
+    notes: Optional[str] = None
+    tags: Optional[List[str]] = None
+    is_public: bool = True
+    nutrition: Optional[ManualNutrition] = None
 
 
 def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
@@ -44,6 +92,129 @@ def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
         is_public=recipe.is_public,
         user_id=recipe.user_id,
     )
+
+
+@router.post("/manual", response_model=RecipeResponse)
+async def create_manual_recipe(
+    recipe_data: str = Form(..., description="JSON string of ManualRecipeCreate"),
+    image: Optional[UploadFile] = File(None, description="Optional recipe image"),
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Create a recipe manually (not from video extraction).
+    
+    Accepts multipart form data with:
+    - recipe_data: JSON string of the recipe details
+    - image: Optional image file for the recipe thumbnail
+    """
+    try:
+        # Parse the JSON recipe data
+        data = json.loads(recipe_data)
+        recipe_input = ManualRecipeCreate(**data)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON in recipe_data: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid recipe data: {e}")
+    
+    # Build the extracted JSONB structure to match extracted recipes
+    ingredients_list = [
+        {
+            "name": ing.name,
+            "quantity": ing.quantity,
+            "unit": ing.unit,
+            "notes": ing.notes,
+        }
+        for ing in recipe_input.ingredients
+    ]
+    
+    extracted = {
+        "title": recipe_input.title,
+        "sourceUrl": "",  # Manual recipes don't have a source URL
+        "servings": recipe_input.servings,
+        "times": {
+            "prep": recipe_input.prep_time,
+            "cook": recipe_input.cook_time,
+            "total": recipe_input.total_time,
+        },
+        "components": [
+            {
+                "name": "Main",
+                "ingredients": ingredients_list,
+                "steps": recipe_input.steps,
+            }
+        ],
+        "ingredients": ingredients_list,  # Legacy field
+        "steps": recipe_input.steps,  # Legacy field
+        "equipment": [],
+        "notes": recipe_input.notes,
+        "tags": recipe_input.tags or [],
+        "media": {"thumbnail": None},
+        "totalEstimatedCost": None,
+        "costLocation": "",
+        "nutrition": {
+            "perServing": {
+                "calories": recipe_input.nutrition.calories if recipe_input.nutrition else None,
+                "protein": recipe_input.nutrition.protein if recipe_input.nutrition else None,
+                "carbs": recipe_input.nutrition.carbs if recipe_input.nutrition else None,
+                "fat": recipe_input.nutrition.fat if recipe_input.nutrition else None,
+                "fiber": None,
+                "sugar": None,
+                "sodium": None,
+            },
+            "total": {
+                "calories": None,
+                "protein": None,
+                "carbs": None,
+                "fat": None,
+                "fiber": None,
+                "sugar": None,
+                "sodium": None,
+            },
+        },
+    }
+    
+    # Create the recipe
+    new_recipe = Recipe(
+        source_url="manual://user-created",
+        source_type="manual",
+        raw_text=None,
+        extracted=extracted,
+        thumbnail_url=None,
+        extraction_method="manual",
+        extraction_quality=None,
+        has_audio_transcript=False,
+        user_id=user.id,
+        is_public=recipe_input.is_public,
+    )
+    
+    db.add(new_recipe)
+    await db.commit()
+    await db.refresh(new_recipe)
+    
+    # Upload image if provided
+    if image and image.filename:
+        try:
+            image_data = await image.read()
+            content_type = image.content_type or "image/jpeg"
+            
+            s3_url = await storage_service.upload_thumbnail_from_bytes(
+                image_data,
+                str(new_recipe.id),
+                content_type
+            )
+            
+            if s3_url:
+                new_recipe.thumbnail_url = s3_url
+                # Update the media field in extracted JSON
+                new_recipe.extracted["media"]["thumbnail"] = s3_url
+                await db.commit()
+                await db.refresh(new_recipe)
+        except Exception as e:
+            print(f"⚠️ Failed to upload image: {e}")
+            # Recipe is still created, just without an image
+    
+    return new_recipe
 
 
 @router.get("/", response_model=list[RecipeListItem])
@@ -233,24 +404,73 @@ async def check_duplicate(
     user: ClerkUser = Depends(get_current_user),
 ):
     """
-    Check if user already has a recipe with this URL.
+    Check if recipe with this URL already exists.
+    
+    First checks if current user has it, then checks for any public recipe.
+    This prevents duplicate extractions and saves API costs.
+    
+    For TikTok, we match by video ID to handle different short URLs for the same video.
     """
-    result = await db.execute(
+    from app.services.video import VideoService
+    
+    print(f"🔍 Original URL: {url}")
+    
+    # Normalize the URL (resolve TikTok short URLs, etc.)
+    normalized_url = await VideoService.normalize_url(url)
+    print(f"🔍 Normalized URL: {normalized_url}")
+    print(f"🔍 User ID: {user.id}")
+    
+    # For TikTok, extract video ID for matching
+    video_id = VideoService.extract_tiktok_video_id(normalized_url)
+    print(f"🔍 TikTok Video ID: {video_id}")
+    
+    # Build query conditions - match by exact URL or by video ID pattern
+    if video_id:
+        # For TikTok, match any URL containing this video ID
+        url_condition = Recipe.source_url.like(f"%/video/{video_id}%")
+    else:
+        # For other platforms, match exact URL or normalized URL
+        url_condition = or_(Recipe.source_url == url, Recipe.source_url == normalized_url)
+    
+    # First, check if the current user already has this recipe
+    user_result = await db.execute(
         select(Recipe).where(
-            Recipe.source_url == url,
+            url_condition,
             Recipe.user_id == user.id
         )
     )
-    existing = result.scalar_one_or_none()
+    user_recipe = user_result.scalar_one_or_none()
+    print(f"🔍 User recipe found: {user_recipe is not None}")
     
-    if existing:
+    if user_recipe:
         return {
             "exists": True,
-            "recipe_id": str(existing.id),
-            "title": existing.extracted.get("title", "Untitled") if existing.extracted else "Untitled",
+            "owned_by_user": True,
+            "is_public": user_recipe.is_public,
+            "recipe_id": str(user_recipe.id),
+            "title": user_recipe.extracted.get("title", "Untitled") if user_recipe.extracted else "Untitled",
         }
     
-    return {"exists": False}
+    # Check if any PUBLIC recipe exists with this URL (from any user)
+    public_result = await db.execute(
+        select(Recipe).where(
+            url_condition,
+            Recipe.is_public == True
+        ).limit(1)
+    )
+    public_recipe = public_result.scalar_one_or_none()
+    print(f"🔍 Public recipe found: {public_recipe is not None}")
+    
+    if public_recipe:
+        return {
+            "exists": True,
+            "owned_by_user": False,
+            "is_public": True,
+            "recipe_id": str(public_recipe.id),
+            "title": public_recipe.extracted.get("title", "Untitled") if public_recipe.extracted else "Untitled",
+        }
+    
+    return {"exists": False, "owned_by_user": False}
 
 
 @router.get("/{recipe_id}", response_model=RecipeResponse)
@@ -388,3 +608,414 @@ async def delete_recipe(
     await db.commit()
     
     return {"message": "Recipe deleted successfully", "id": str(recipe_id)}
+
+
+@router.patch("/{recipe_id}", response_model=RecipeResponse)
+async def edit_recipe(
+    recipe_id: UUID,
+    edit: RecipeEdit,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Fully edit a recipe's content.
+    
+    For extracted recipes: saves original to original_extracted on first edit.
+    For manual recipes: just updates directly.
+    Only the recipe owner can edit.
+    """
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Only owner can edit
+    if recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="You can only edit your own recipes")
+    
+    # For extracted recipes, save original on first edit
+    if recipe.source_type != "manual" and recipe.original_extracted is None:
+        recipe.original_extracted = dict(recipe.extracted) if recipe.extracted else {}
+    
+    # Build the new extracted structure
+    ingredients_list = [
+        {
+            "name": ing.name,
+            "quantity": ing.quantity,
+            "unit": ing.unit,
+            "notes": ing.notes,
+        }
+        for ing in edit.ingredients
+    ]
+    
+    # Preserve some fields from original extracted data
+    old_extracted = recipe.extracted or {}
+    
+    new_extracted = {
+        "title": edit.title,
+        "sourceUrl": old_extracted.get("sourceUrl", ""),
+        "servings": edit.servings,
+        "times": {
+            "prep": edit.prep_time,
+            "cook": edit.cook_time,
+            "total": edit.total_time,
+        },
+        "components": [
+            {
+                "name": "Main",
+                "ingredients": ingredients_list,
+                "steps": edit.steps,
+            }
+        ],
+        "ingredients": ingredients_list,  # Legacy field
+        "steps": edit.steps,  # Legacy field
+        "equipment": old_extracted.get("equipment", []),
+        "notes": edit.notes,
+        "tags": edit.tags or [],
+        "media": old_extracted.get("media", {"thumbnail": None}),
+        "totalEstimatedCost": old_extracted.get("totalEstimatedCost"),
+        "costLocation": old_extracted.get("costLocation", ""),
+        "nutrition": {
+            "perServing": {
+                "calories": edit.nutrition.calories if edit.nutrition else old_extracted.get("nutrition", {}).get("perServing", {}).get("calories"),
+                "protein": edit.nutrition.protein if edit.nutrition else old_extracted.get("nutrition", {}).get("perServing", {}).get("protein"),
+                "carbs": edit.nutrition.carbs if edit.nutrition else old_extracted.get("nutrition", {}).get("perServing", {}).get("carbs"),
+                "fat": edit.nutrition.fat if edit.nutrition else old_extracted.get("nutrition", {}).get("perServing", {}).get("fat"),
+                "fiber": old_extracted.get("nutrition", {}).get("perServing", {}).get("fiber"),
+                "sugar": old_extracted.get("nutrition", {}).get("perServing", {}).get("sugar"),
+                "sodium": old_extracted.get("nutrition", {}).get("perServing", {}).get("sodium"),
+            },
+            "total": old_extracted.get("nutrition", {}).get("total", {}),
+        },
+    }
+    
+    recipe.extracted = new_extracted
+    
+    # Update is_public if provided
+    if edit.is_public is not None:
+        recipe.is_public = edit.is_public
+    
+    await db.commit()
+    await db.refresh(recipe)
+    
+    return recipe
+
+
+@router.post("/{recipe_id}/edit", response_model=RecipeResponse)
+async def edit_recipe_with_image(
+    recipe_id: UUID,
+    recipe_data: str = Form(..., description="JSON string of RecipeEdit"),
+    image: Optional[UploadFile] = File(None, description="Optional new recipe image"),
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Edit a recipe with optional image upload.
+    
+    Accepts multipart form data with:
+    - recipe_data: JSON string of the edit details
+    - image: Optional new image file for the recipe thumbnail
+    """
+    try:
+        data = json.loads(recipe_data)
+        edit = RecipeEdit(**data)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON in recipe_data: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid recipe data: {e}")
+    
+    # Get the recipe
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Only owner can edit
+    if recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="You can only edit your own recipes")
+    
+    # For extracted recipes, save original on first edit
+    if recipe.source_type != "manual" and recipe.original_extracted is None:
+        recipe.original_extracted = dict(recipe.extracted) if recipe.extracted else {}
+    
+    # Handle image upload
+    thumbnail_url = recipe.thumbnail_url
+    if image:
+        try:
+            image_bytes = await image.read()
+            thumbnail_url = await storage_service.upload_thumbnail_from_bytes(
+                image_bytes, str(recipe_id)
+            )
+        except Exception as e:
+            print(f"Failed to upload image: {e}")
+            # Continue without updating the image
+    
+    # Build the new extracted structure
+    ingredients_list = [
+        {
+            "name": ing.name,
+            "quantity": ing.quantity,
+            "unit": ing.unit,
+            "notes": ing.notes,
+        }
+        for ing in edit.ingredients
+    ]
+    
+    old_extracted = recipe.extracted or {}
+    
+    new_extracted = {
+        "title": edit.title,
+        "sourceUrl": old_extracted.get("sourceUrl", ""),
+        "servings": edit.servings,
+        "times": {
+            "prep": edit.prep_time,
+            "cook": edit.cook_time,
+            "total": edit.total_time,
+        },
+        "components": [
+            {
+                "name": "Main",
+                "ingredients": ingredients_list,
+                "steps": edit.steps,
+            }
+        ],
+        "ingredients": ingredients_list,
+        "steps": edit.steps,
+        "equipment": old_extracted.get("equipment", []),
+        "notes": edit.notes,
+        "tags": edit.tags or [],
+        "media": {"thumbnail": thumbnail_url},
+        "totalEstimatedCost": old_extracted.get("totalEstimatedCost"),
+        "costLocation": old_extracted.get("costLocation", ""),
+        "nutrition": {
+            "perServing": {
+                "calories": edit.nutrition.calories if edit.nutrition else old_extracted.get("nutrition", {}).get("perServing", {}).get("calories"),
+                "protein": edit.nutrition.protein if edit.nutrition else old_extracted.get("nutrition", {}).get("perServing", {}).get("protein"),
+                "carbs": edit.nutrition.carbs if edit.nutrition else old_extracted.get("nutrition", {}).get("perServing", {}).get("carbs"),
+                "fat": edit.nutrition.fat if edit.nutrition else old_extracted.get("nutrition", {}).get("perServing", {}).get("fat"),
+                "fiber": old_extracted.get("nutrition", {}).get("perServing", {}).get("fiber"),
+                "sugar": old_extracted.get("nutrition", {}).get("perServing", {}).get("sugar"),
+                "sodium": old_extracted.get("nutrition", {}).get("perServing", {}).get("sodium"),
+            },
+            "total": old_extracted.get("nutrition", {}).get("total", {}),
+        },
+    }
+    
+    recipe.extracted = new_extracted
+    recipe.thumbnail_url = thumbnail_url
+    
+    if edit.is_public is not None:
+        recipe.is_public = edit.is_public
+    
+    await db.commit()
+    await db.refresh(recipe)
+    
+    return recipe
+
+
+@router.post("/{recipe_id}/restore", response_model=RecipeResponse)
+async def restore_original_recipe(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Restore an edited recipe to its original AI-extracted version.
+    
+    Only works for extracted recipes that have been edited.
+    """
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Only owner can restore
+    if recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="You can only restore your own recipes")
+    
+    # Check if there's an original to restore
+    if recipe.original_extracted is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="No original version available. This recipe hasn't been edited or is a manual recipe."
+        )
+    
+    # Restore the original
+    recipe.extracted = dict(recipe.original_extracted)
+    recipe.original_extracted = None  # Clear the backup
+    
+    await db.commit()
+    await db.refresh(recipe)
+    
+    return recipe
+
+
+@router.get("/{recipe_id}/has-original")
+async def check_has_original(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Check if a recipe has an original version that can be restored.
+    """
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Only owner can check
+    if recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return {
+        "has_original": recipe.original_extracted is not None,
+        "source_type": recipe.source_type,
+    }
+
+
+# ============================================================
+# Saved/Bookmarked Recipes
+# ============================================================
+
+@router.post("/{recipe_id}/save")
+async def save_recipe(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Save/bookmark a public recipe to the user's collection.
+    """
+    # Check if recipe exists and is public
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Can't save your own recipe
+    if recipe.user_id == user.id:
+        raise HTTPException(status_code=400, detail="You can't save your own recipe")
+    
+    # Recipe must be public to save
+    if not recipe.is_public:
+        raise HTTPException(status_code=403, detail="This recipe is not public")
+    
+    # Check if already saved
+    existing = await db.execute(
+        select(SavedRecipe).where(
+            SavedRecipe.user_id == user.id,
+            SavedRecipe.recipe_id == recipe_id
+        )
+    )
+    if existing.scalar_one_or_none():
+        return {"saved": True, "message": "Recipe already saved"}
+    
+    # Create the save
+    saved = SavedRecipe(user_id=user.id, recipe_id=recipe_id)
+    db.add(saved)
+    await db.commit()
+    
+    return {"saved": True, "message": "Recipe saved to your collection"}
+
+
+@router.delete("/{recipe_id}/save")
+async def unsave_recipe(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Remove a saved recipe from the user's collection.
+    """
+    result = await db.execute(
+        select(SavedRecipe).where(
+            SavedRecipe.user_id == user.id,
+            SavedRecipe.recipe_id == recipe_id
+        )
+    )
+    saved = result.scalar_one_or_none()
+    
+    if not saved:
+        return {"saved": False, "message": "Recipe was not saved"}
+    
+    await db.delete(saved)
+    await db.commit()
+    
+    return {"saved": False, "message": "Recipe removed from your collection"}
+
+
+@router.get("/{recipe_id}/saved")
+async def check_recipe_saved(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Check if a recipe is saved by the current user.
+    """
+    result = await db.execute(
+        select(SavedRecipe).where(
+            SavedRecipe.user_id == user.id,
+            SavedRecipe.recipe_id == recipe_id
+        )
+    )
+    saved = result.scalar_one_or_none()
+    
+    return {"is_saved": saved is not None}
+
+
+@router.get("/saved/list", response_model=List[RecipeListItem])
+async def get_saved_recipes(
+    limit: int = Query(default=50, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Get all recipes saved by the current user.
+    """
+    # Join SavedRecipe with Recipe to get the actual recipe data
+    result = await db.execute(
+        select(Recipe)
+        .join(SavedRecipe, SavedRecipe.recipe_id == Recipe.id)
+        .where(SavedRecipe.user_id == user.id)
+        .order_by(SavedRecipe.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    recipes = result.scalars().all()
+    
+    return [recipe_to_list_item(recipe) for recipe in recipes]
+
+
+@router.get("/saved/count")
+async def get_saved_recipes_count(
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Get count of saved recipes for the current user.
+    """
+    result = await db.execute(
+        select(func.count(SavedRecipe.id))
+        .where(SavedRecipe.user_id == user.id)
+    )
+    count = result.scalar()
+    
+    return {"count": count}

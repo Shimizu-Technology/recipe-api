@@ -41,6 +41,36 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Response from the recipe chat."""
     response: str
+
+
+class SuggestTagsRequest(BaseModel):
+    """Request to suggest tags for a recipe."""
+    title: str
+    ingredients: list[str]
+
+
+class SuggestTagsResponse(BaseModel):
+    """Response with suggested tags."""
+    tags: list[str]
+
+
+class EstimateNutritionRequest(BaseModel):
+    """Request to estimate nutrition for a recipe."""
+    ingredients: list[str]
+    servings: int = 4
+
+
+class NutritionEstimate(BaseModel):
+    """Estimated nutrition values."""
+    calories: int
+    protein: int
+    carbs: int
+    fat: int
+
+
+class EstimateNutritionResponse(BaseModel):
+    """Response with estimated nutrition."""
+    nutrition: NutritionEstimate
     
 
 # ============================================================
@@ -254,5 +284,148 @@ async def chat_about_recipe(
         raise HTTPException(
             status_code=500,
             detail="Failed to get response from AI. Please try again."
+        )
+
+
+@router.post("/ai/suggest-tags", response_model=SuggestTagsResponse)
+async def suggest_tags(
+    request: SuggestTagsRequest,
+    user: ClerkUser = Depends(get_current_user)
+):
+    """
+    Suggest tags for a recipe based on title and ingredients.
+    """
+    ingredient_list = ", ".join(request.ingredients)
+    
+    prompt = f"""Based on this recipe information, suggest 5-8 relevant tags.
+
+Recipe title: {request.title}
+Ingredients: {ingredient_list}
+
+Return ONLY a JSON array of lowercase tag strings. Tags should describe:
+- Cuisine type (italian, mexican, asian, etc.)
+- Meal type (breakfast, lunch, dinner, snack, dessert)
+- Dietary info (vegetarian, vegan, gluten-free, dairy-free, keto, etc.)
+- Cooking method (baked, grilled, fried, slow-cooker, etc.)
+- Key characteristics (quick, easy, healthy, comfort-food, etc.)
+
+Example response: ["italian", "dinner", "pasta", "quick", "vegetarian"]
+
+Return ONLY the JSON array, no other text."""
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that suggests recipe tags. Return only valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=200,
+            temperature=0.5,
+        )
+        
+        result = response.choices[0].message.content.strip()
+        
+        # Parse JSON response
+        try:
+            # Handle potential markdown code blocks
+            if result.startswith("```"):
+                result = result.split("```")[1]
+                if result.startswith("json"):
+                    result = result[4:]
+            
+            tags = json.loads(result)
+            if isinstance(tags, list):
+                return SuggestTagsResponse(tags=tags[:10])  # Limit to 10 tags
+        except json.JSONDecodeError:
+            # Fallback: try to extract comma-separated values
+            tags = [t.strip().lower().strip('"\'') for t in result.split(",")]
+            return SuggestTagsResponse(tags=tags[:10])
+        
+        return SuggestTagsResponse(tags=[])
+        
+    except Exception as e:
+        print(f"❌ Tag suggestion error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to suggest tags. Please try again."
+        )
+
+
+@router.post("/ai/estimate-nutrition", response_model=EstimateNutritionResponse)
+async def estimate_nutrition(
+    request: EstimateNutritionRequest,
+    user: ClerkUser = Depends(get_current_user)
+):
+    """
+    Estimate nutrition facts for a recipe based on ingredients.
+    """
+    ingredient_list = "\n".join(f"- {ing}" for ing in request.ingredients)
+    
+    prompt = f"""Estimate the nutrition facts PER SERVING for a recipe with {request.servings} servings.
+
+Ingredients:
+{ingredient_list}
+
+Calculate reasonable estimates based on standard nutritional databases.
+Return ONLY a JSON object with these numeric values (integers, no units):
+{{"calories": number, "protein": number, "carbs": number, "fat": number}}
+
+Example: {{"calories": 350, "protein": 25, "carbs": 30, "fat": 12}}
+
+Return ONLY the JSON object, no other text."""
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a nutrition expert. Estimate nutrition facts accurately based on common ingredient values. Return only valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=100,
+            temperature=0.3,  # More deterministic for calculations
+        )
+        
+        result = response.choices[0].message.content.strip()
+        
+        # Parse JSON response
+        try:
+            # Handle potential markdown code blocks
+            if result.startswith("```"):
+                result = result.split("```")[1]
+                if result.startswith("json"):
+                    result = result[4:]
+            
+            # Find JSON object in response
+            json_match = result
+            if "{" in result:
+                start = result.index("{")
+                end = result.rindex("}") + 1
+                json_match = result[start:end]
+            
+            nutrition = json.loads(json_match)
+            
+            return EstimateNutritionResponse(
+                nutrition=NutritionEstimate(
+                    calories=int(nutrition.get("calories", 0)),
+                    protein=int(nutrition.get("protein", 0)),
+                    carbs=int(nutrition.get("carbs", 0)),
+                    fat=int(nutrition.get("fat", 0)),
+                )
+            )
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"Failed to parse nutrition JSON: {result}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to parse nutrition data. Please try again."
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Nutrition estimation error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to estimate nutrition. Please try again."
         )
 

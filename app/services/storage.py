@@ -162,6 +162,67 @@ class StorageService:
         """
         settings = get_settings()
         return f"https://{self.bucket_name}.s3.{settings.aws_region}.amazonaws.com/thumbnails/{recipe_id}.{extension}"
+    
+    async def upload_thumbnail_from_bytes(
+        self,
+        image_data: bytes,
+        recipe_id: str | UUID,
+        content_type: str = "image/jpeg"
+    ) -> Optional[str]:
+        """
+        Upload image bytes directly to S3.
+        
+        Args:
+            image_data: Raw image bytes
+            recipe_id: Recipe ID to use as filename
+            content_type: MIME type of the image
+            
+        Returns:
+            S3 URL if successful, None if failed or S3 not configured
+        """
+        if not self.is_enabled:
+            print("⚠️ S3 not configured, skipping thumbnail upload")
+            return None
+        
+        if not image_data:
+            return None
+        
+        try:
+            # Determine file extension from content type
+            if "png" in content_type:
+                extension = "png"
+            elif "webp" in content_type:
+                extension = "webp"
+            elif "gif" in content_type:
+                extension = "gif"
+            else:
+                extension = "jpg"
+            
+            # Upload to S3
+            s3_key = f"thumbnails/{recipe_id}.{extension}"
+            
+            print(f"📤 Uploading to S3: {s3_key}")
+            
+            self.client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=image_data,
+                ContentType=content_type,
+            )
+            
+            # Generate public URL
+            settings = get_settings()
+            s3_url = f"https://{self.bucket_name}.s3.{settings.aws_region}.amazonaws.com/{s3_key}"
+            
+            print(f"✅ Thumbnail uploaded: {s3_url}")
+            return s3_url
+            
+        except ClientError as e:
+            print(f"❌ Failed to upload to S3: {e}")
+            return None
+        except Exception as e:
+            print(f"❌ Unexpected error uploading thumbnail: {e}")
+            return None
 
 
 # Singleton instance

@@ -27,6 +27,7 @@ class Recipe(Base):
     source_type = Column(String(32), nullable=False)  # youtube|tiktok|instagram|web|manual
     raw_text = Column(Text, nullable=True)
     extracted = Column(JSONB, nullable=False)
+    original_extracted = Column(JSONB, nullable=True)  # Stores original AI extraction before user edits
     thumbnail_url = Column(Text, nullable=True)
     extraction_method = Column(String(32), nullable=True)  # whisper|basic|oembed|manual
     extraction_quality = Column(String(16), nullable=True)  # high|medium|low
@@ -46,6 +47,26 @@ class Recipe(Base):
     def __repr__(self):
         title = self.extracted.get("title", "Untitled") if self.extracted else "Untitled"
         return f"<Recipe {self.id}: {title}>"
+
+
+class SavedRecipe(Base):
+    """
+    SavedRecipe model - tracks which recipes users have bookmarked/saved.
+    
+    Allows users to save public recipes from other users to their collection.
+    """
+    __tablename__ = "saved_recipes"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(64), nullable=False, index=True)
+    recipe_id = Column(UUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationship to recipe
+    recipe = relationship("Recipe")
+    
+    def __repr__(self):
+        return f"<SavedRecipe user={self.user_id} recipe={self.recipe_id}>"
 
 
 class ExtractionJob(Base):

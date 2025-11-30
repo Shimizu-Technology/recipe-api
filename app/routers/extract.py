@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from pydantic import BaseModel, HttpUrl
 from typing import Optional
 from uuid import UUID, uuid4
@@ -161,13 +161,20 @@ async def start_extraction_job(
     Start an async extraction job.
     
     Returns immediately with a job ID that can be polled for status.
+    URLs are normalized (e.g., TikTok short URLs resolved) before storing.
     """
-    url = request.url.strip()
+    from app.services.video import VideoService
     
-    # Check for existing recipe FROM THIS USER
+    original_url = request.url.strip()
+    
+    # Normalize the URL (resolve TikTok short URLs, etc.)
+    url = await VideoService.normalize_url(original_url)
+    print(f"📎 Normalized URL: {original_url} → {url}")
+    
+    # Check for existing recipe FROM THIS USER (check both original and normalized)
     result = await db.execute(
         select(Recipe).where(
-            Recipe.source_url == url,
+            or_(Recipe.source_url == original_url, Recipe.source_url == url),
             Recipe.user_id == user.id
         )
     )
