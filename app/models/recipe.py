@@ -69,6 +69,43 @@ class SavedRecipe(Base):
         return f"<SavedRecipe user={self.user_id} recipe={self.recipe_id}>"
 
 
+class Collection(Base):
+    """
+    Collection model - user-created folders for organizing recipes.
+    
+    Users can create collections like "Weeknight Dinners", "Holiday Favorites", etc.
+    """
+    __tablename__ = "collections"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(64), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    emoji = Column(String(10), nullable=True)  # Optional emoji icon
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    # Relationship to recipes via junction table
+    recipes = relationship("Recipe", secondary="collection_recipes", backref="collections")
+    
+    def __repr__(self):
+        return f"<Collection {self.id}: {self.name}>"
+
+
+class CollectionRecipe(Base):
+    """
+    CollectionRecipe model - junction table for many-to-many relationship
+    between collections and recipes.
+    """
+    __tablename__ = "collection_recipes"
+    
+    collection_id = Column(UUID(as_uuid=True), ForeignKey("collections.id", ondelete="CASCADE"), primary_key=True)
+    recipe_id = Column(UUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), primary_key=True)
+    added_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    def __repr__(self):
+        return f"<CollectionRecipe collection={self.collection_id} recipe={self.recipe_id}>"
+
+
 class ExtractionJob(Base):
     """
     Extraction job model - matches existing 'extraction_jobs' table in Neon.

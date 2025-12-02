@@ -4,6 +4,6 @@ from .extract import router as extract_router
 from .grocery import router as grocery_router
 from .chat import router as chat_router
 from .users import router as users_router
+from .collections import router as collections_router
 
-__all__ = ["recipes_router", "health_router", "extract_router", "grocery_router", "chat_router", "users_router"]
-
+__all__ = ["recipes_router", "health_router", "extract_router", "grocery_router", "chat_router", "users_router", "collections_router"]

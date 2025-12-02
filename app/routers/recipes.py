@@ -2,10 +2,10 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
-from pydantic import BaseModel
+from sqlalchemy import select, func, or_, String
+from pydantic import BaseModel, ConfigDict
 from uuid import UUID
-from typing import Optional, List
+from typing import Optional, List, Generic, TypeVar
 import json
 
 from app.db import get_db
@@ -15,6 +15,18 @@ from app.auth import get_current_user, get_optional_user, ClerkUser
 from app.services.storage import storage_service
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
+
+
+# Paginated response model
+class PaginatedRecipes(BaseModel):
+    """Paginated response for recipe lists."""
+    items: List[RecipeListItem]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+    
+    model_config = ConfigDict(from_attributes=True)
 
 
 class RecipeUpdate(BaseModel):
@@ -217,58 +229,86 @@ async def create_manual_recipe(
     return new_recipe
 
 
-@router.get("/", response_model=list[RecipeListItem])
+@router.get("/", response_model=PaginatedRecipes)
 async def get_my_recipes(
-    limit: int = Query(default=50, le=100, description="Max recipes to return"),
+    limit: int = Query(default=20, le=100, description="Max recipes to return"),
     offset: int = Query(default=0, ge=0, description="Number of recipes to skip"),
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
     """
-    Get current user's recipes, ordered by most recent first.
+    Get current user's recipes with pagination, ordered by most recent first.
     
     Requires authentication.
     """
-    query = select(Recipe).where(Recipe.user_id == user.id)
+    base_query = select(Recipe).where(Recipe.user_id == user.id)
     
     # Apply source_type filter if provided
     if source_type and source_type != 'all':
-        query = query.where(Recipe.source_type == source_type)
+        base_query = base_query.where(Recipe.source_type == source_type)
     
-    query = query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
+    # Get total count
+    count_result = await db.execute(select(func.count()).select_from(base_query.subquery()))
+    total_count = count_result.scalar() or 0
     
-    result = await db.execute(query)
+    # Execute paginated query
+    result = await db.execute(
+        base_query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
+    )
     recipes = result.scalars().all()
     
-    return [recipe_to_list_item(r) for r in recipes]
+    items = [recipe_to_list_item(r) for r in recipes]
+    has_more = offset + len(items) < total_count
+    
+    return PaginatedRecipes(
+        items=items,
+        total=total_count,
+        limit=limit,
+        offset=offset,
+        has_more=has_more,
+    )
 
 
-@router.get("/discover", response_model=list[RecipeListItem])
+@router.get("/discover", response_model=PaginatedRecipes)
 async def get_public_recipes(
-    limit: int = Query(default=50, le=100, description="Max recipes to return"),
+    limit: int = Query(default=20, le=100, description="Max recipes to return"),
     offset: int = Query(default=0, ge=0, description="Number of recipes to skip"),
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     db: AsyncSession = Depends(get_db),
     user: Optional[ClerkUser] = Depends(get_optional_user),
 ):
     """
-    Get all public recipes (the shared library).
+    Get all public recipes (the shared library) with pagination.
     
     Works with or without authentication.
     """
-    query = select(Recipe).where(Recipe.is_public == True)
+    base_query = select(Recipe).where(Recipe.is_public == True)
     
     # Apply source_type filter if provided
     if source_type and source_type != 'all':
-        query = query.where(Recipe.source_type == source_type)
+        base_query = base_query.where(Recipe.source_type == source_type)
     
-    query = query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
+    # Get total count
+    count_result = await db.execute(select(func.count()).select_from(base_query.subquery()))
+    total_count = count_result.scalar() or 0
     
-    result = await db.execute(query)
+    # Execute paginated query
+    result = await db.execute(
+        base_query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
+    )
     recipes = result.scalars().all()
     
-    return [recipe_to_list_item(r) for r in recipes]
+    items = [recipe_to_list_item(r) for r in recipes]
+    has_more = offset + len(items) < total_count
+    
+    return PaginatedRecipes(
+        items=items,
+        total=total_count,
+        limit=limit,
+        offset=offset,
+        has_more=has_more,
+    )
 
 
 @router.get("/count")
@@ -304,79 +344,248 @@ async def get_public_recipe_count(
     return {"count": count or 0}
 
 
-@router.get("/search", response_model=list[RecipeListItem])
+def parse_time_to_minutes(time_str: str) -> Optional[int]:
+    """Parse time string like '30 minutes', '1 hour', '1h 30m' to minutes."""
+    if not time_str:
+        return None
+    
+    time_str = time_str.lower().strip()
+    total_minutes = 0
+    
+    # Handle "X hours" or "X hour"
+    import re
+    hours_match = re.search(r'(\d+)\s*(?:hours?|hrs?|h)', time_str)
+    if hours_match:
+        total_minutes += int(hours_match.group(1)) * 60
+    
+    # Handle "X minutes" or "X min"
+    mins_match = re.search(r'(\d+)\s*(?:minutes?|mins?|m(?!onth))', time_str)
+    if mins_match:
+        total_minutes += int(mins_match.group(1))
+    
+    # Handle just a number (assume minutes)
+    if total_minutes == 0:
+        num_match = re.search(r'(\d+)', time_str)
+        if num_match:
+            total_minutes = int(num_match.group(1))
+    
+    return total_minutes if total_minutes > 0 else None
+
+
+@router.get("/search", response_model=PaginatedRecipes)
 async def search_recipes(
-    q: str = Query(..., min_length=1, description="Search query"),
-    limit: int = Query(default=20, le=50),
-    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
+    q: str = Query(default="", description="Search query (searches title, ingredients, tags)"),
+    limit: int = Query(default=20, le=100),
+    offset: int = Query(default=0, ge=0),
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram, manual"),
+    time_filter: Optional[str] = Query(default=None, description="Filter by time: quick (<30min), medium (30-60min), long (60min+)"),
+    tags: Optional[str] = Query(default=None, description="Comma-separated tags to filter by"),
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
     """
-    Search user's recipes by title, ingredients, or tags.
+    Search and filter user's recipes with pagination.
+    - Search across title, ingredients, and tags
+    - Filter by source type, time, and tags
+    - Returns paginated results with total count
     """
-    search_term = f"%{q.lower()}%"
+    # Start with base query
+    base_query = select(Recipe).where(Recipe.user_id == user.id)
     
-    # Build base conditions
-    conditions = [
-        Recipe.user_id == user.id,
-        or_(
-            func.lower(Recipe.extracted["title"].astext).like(search_term),
-            Recipe.extracted["tags"].astext.ilike(search_term),
-            func.lower(Recipe.source_url).like(search_term),
+    # Full-text search across multiple fields
+    if q and q.strip():
+        search_term = f"%{q.lower()}%"
+        base_query = base_query.where(
+            or_(
+                # Search in title
+                func.lower(Recipe.extracted["title"].astext).like(search_term),
+                # Search in tags array (cast to text)
+                Recipe.extracted["tags"].astext.ilike(search_term),
+                # Search in ingredients (JSONB contains - searches nested structure)
+                func.lower(func.cast(Recipe.extracted["components"], String)).like(search_term),
+                # Search in instructions
+                func.lower(func.cast(Recipe.extracted["steps"], String)).like(search_term),
+            )
         )
-    ]
     
-    # Add source_type filter if provided
+    # Filter by source type
     if source_type and source_type != 'all':
-        conditions.append(Recipe.source_type == source_type)
+        base_query = base_query.where(Recipe.source_type == source_type)
     
+    # Filter by tags (comma-separated)
+    if tags:
+        tag_list = [t.strip().lower() for t in tags.split(',') if t.strip()]
+        for tag in tag_list:
+            base_query = base_query.where(
+                func.lower(Recipe.extracted["tags"].astext).like(f"%{tag}%")
+            )
+    
+    # Get total count (before pagination, but after search/filters except time)
+    count_result = await db.execute(select(func.count()).select_from(base_query.subquery()))
+    total_count = count_result.scalar() or 0
+    
+    # Execute paginated query
     result = await db.execute(
-        select(Recipe)
-        .where(*conditions)
-        .order_by(Recipe.created_at.desc())
-        .limit(limit)
+        base_query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
     )
-    recipes = result.scalars().all()
+    recipes = list(result.scalars().all())
     
-    return [recipe_to_list_item(r) for r in recipes]
+    # Filter by time in Python (since time parsing is complex for SQL)
+    if time_filter and time_filter != 'all':
+        filtered_recipes = []
+        for recipe in recipes:
+            total_time = recipe.extracted.get("times", {}).get("total") or recipe.extracted.get("total_time")
+            minutes = parse_time_to_minutes(total_time) if total_time else None
+            
+            if minutes is None:
+                # Include recipes without time info only if not filtering
+                continue
+            elif time_filter == 'quick' and minutes < 30:
+                filtered_recipes.append(recipe)
+            elif time_filter == 'medium' and 30 <= minutes <= 60:
+                filtered_recipes.append(recipe)
+            elif time_filter == 'long' and minutes > 60:
+                filtered_recipes.append(recipe)
+        
+        recipes = filtered_recipes
+    
+    items = [recipe_to_list_item(r) for r in recipes]
+    has_more = offset + len(items) < total_count
+    
+    return PaginatedRecipes(
+        items=items,
+        total=total_count,
+        limit=limit,
+        offset=offset,
+        has_more=has_more,
+    )
 
 
-@router.get("/discover/search", response_model=list[RecipeListItem])
+@router.get("/discover/search", response_model=PaginatedRecipes)
 async def search_public_recipes(
-    q: str = Query(..., min_length=1, description="Search query"),
-    limit: int = Query(default=20, le=50),
-    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
+    q: str = Query(default="", description="Search query (searches title, ingredients, tags)"),
+    limit: int = Query(default=20, le=100),
+    offset: int = Query(default=0, ge=0),
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram, manual"),
+    time_filter: Optional[str] = Query(default=None, description="Filter by time: quick (<30min), medium (30-60min), long (60min+)"),
+    tags: Optional[str] = Query(default=None, description="Comma-separated tags to filter by"),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Search public recipes by title, ingredients, or tags.
+    Search and filter public recipes with pagination.
+    - Search across title, ingredients, and tags
+    - Filter by source type, time, and tags
+    - Returns paginated results with total count
     """
-    search_term = f"%{q.lower()}%"
+    # Start with base query
+    base_query = select(Recipe).where(Recipe.is_public == True)
     
-    # Build base conditions
-    conditions = [
-        Recipe.is_public == True,
-        or_(
-            func.lower(Recipe.extracted["title"].astext).like(search_term),
-            Recipe.extracted["tags"].astext.ilike(search_term),
-            func.lower(Recipe.source_url).like(search_term),
+    # Full-text search across multiple fields
+    if q and q.strip():
+        search_term = f"%{q.lower()}%"
+        base_query = base_query.where(
+            or_(
+                # Search in title
+                func.lower(Recipe.extracted["title"].astext).like(search_term),
+                # Search in tags array (cast to text)
+                Recipe.extracted["tags"].astext.ilike(search_term),
+                # Search in ingredients (JSONB contains - searches nested structure)
+                func.lower(func.cast(Recipe.extracted["components"], String)).like(search_term),
+                # Search in instructions
+                func.lower(func.cast(Recipe.extracted["steps"], String)).like(search_term),
+            )
         )
-    ]
     
-    # Add source_type filter if provided
+    # Filter by source type
     if source_type and source_type != 'all':
-        conditions.append(Recipe.source_type == source_type)
+        base_query = base_query.where(Recipe.source_type == source_type)
     
+    # Filter by tags (comma-separated)
+    if tags:
+        tag_list = [t.strip().lower() for t in tags.split(',') if t.strip()]
+        for tag in tag_list:
+            base_query = base_query.where(
+                func.lower(Recipe.extracted["tags"].astext).like(f"%{tag}%")
+            )
+    
+    # Get total count (before pagination, but after search/filters except time)
+    count_result = await db.execute(select(func.count()).select_from(base_query.subquery()))
+    total_count = count_result.scalar() or 0
+    
+    # Execute paginated query
     result = await db.execute(
-        select(Recipe)
-        .where(*conditions)
-        .order_by(Recipe.created_at.desc())
-        .limit(limit)
+        base_query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
     )
-    recipes = result.scalars().all()
+    recipes = list(result.scalars().all())
     
-    return [recipe_to_list_item(r) for r in recipes]
+    # Filter by time in Python (since time parsing is complex for SQL)
+    if time_filter and time_filter != 'all':
+        filtered_recipes = []
+        for recipe in recipes:
+            total_time = recipe.extracted.get("times", {}).get("total") or recipe.extracted.get("total_time")
+            minutes = parse_time_to_minutes(total_time) if total_time else None
+            
+            if minutes is None:
+                continue
+            elif time_filter == 'quick' and minutes < 30:
+                filtered_recipes.append(recipe)
+            elif time_filter == 'medium' and 30 <= minutes <= 60:
+                filtered_recipes.append(recipe)
+            elif time_filter == 'long' and minutes > 60:
+                filtered_recipes.append(recipe)
+        
+        recipes = filtered_recipes
+    
+    items = [recipe_to_list_item(r) for r in recipes]
+    has_more = offset + len(items) < total_count
+    
+    return PaginatedRecipes(
+        items=items,
+        total=total_count,
+        limit=limit,
+        offset=offset,
+        has_more=has_more,
+    )
+
+
+@router.get("/tags/popular")
+async def get_popular_tags(
+    scope: str = Query(default="user", description="Scope: 'user' for user's tags, 'public' for all public recipe tags"),
+    limit: int = Query(default=10, le=20),
+    db: AsyncSession = Depends(get_db),
+    user: Optional[ClerkUser] = Depends(get_optional_user),
+):
+    """
+    Get popular tags with counts.
+    - scope='user': Tags from user's own recipes (requires auth)
+    - scope='public': Tags from all public recipes
+    """
+    from collections import Counter
+    
+    # Build query based on scope
+    if scope == "user":
+        if not user:
+            return []
+        query = select(Recipe.extracted["tags"]).where(Recipe.user_id == user.id)
+    else:
+        query = select(Recipe.extracted["tags"]).where(Recipe.is_public == True)
+    
+    result = await db.execute(query)
+    rows = result.all()
+    
+    # Count all tags
+    tag_counter = Counter()
+    for row in rows:
+        tags = row[0]  # This is the JSONB tags array
+        if tags and isinstance(tags, list):
+            for tag in tags:
+                if tag and isinstance(tag, str):
+                    tag_counter[tag.lower()] += 1
+    
+    # Get top tags
+    top_tags = tag_counter.most_common(limit)
+    
+    return [{"tag": tag, "count": count} for tag, count in top_tags]
 
 
 @router.get("/recent", response_model=list[RecipeListItem])
@@ -980,16 +1189,24 @@ async def check_recipe_saved(
     return {"is_saved": saved is not None}
 
 
-@router.get("/saved/list", response_model=List[RecipeListItem])
+@router.get("/saved/list", response_model=PaginatedRecipes)
 async def get_saved_recipes(
-    limit: int = Query(default=50, le=100),
+    limit: int = Query(default=20, le=100),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
     """
-    Get all recipes saved by the current user.
+    Get all recipes saved by the current user with pagination.
     """
+    # Get total count
+    count_result = await db.execute(
+        select(func.count())
+        .select_from(SavedRecipe)
+        .where(SavedRecipe.user_id == user.id)
+    )
+    total_count = count_result.scalar() or 0
+    
     # Join SavedRecipe with Recipe to get the actual recipe data
     result = await db.execute(
         select(Recipe)
@@ -1001,7 +1218,16 @@ async def get_saved_recipes(
     )
     recipes = result.scalars().all()
     
-    return [recipe_to_list_item(recipe) for recipe in recipes]
+    items = [recipe_to_list_item(recipe) for recipe in recipes]
+    has_more = offset + len(items) < total_count
+    
+    return PaginatedRecipes(
+        items=items,
+        total=total_count,
+        limit=limit,
+        offset=offset,
+        has_more=has_more,
+    )
 
 
 @router.get("/saved/count")
