@@ -85,6 +85,35 @@ class RecipeExtractor:
         metadata = await video_service.fetch_oembed(url, platform)
         thumbnail_url = metadata.thumbnail
         
+        # For Instagram (or if oEmbed fails), fetch metadata from yt-dlp
+        # oEmbed for Instagram requires a Facebook Graph API token which we may not have
+        # yt-dlp also provides richer descriptions for Instagram
+        ytdlp_metadata = None
+        if platform == "instagram" or not thumbnail_url or not metadata.description:
+            print(f"📷 Fetching metadata from yt-dlp for {platform}...")
+            ytdlp_metadata = await video_service.get_video_metadata_ytdlp(url)
+            
+            if ytdlp_metadata.thumbnail and not thumbnail_url:
+                thumbnail_url = ytdlp_metadata.thumbnail
+                print(f"✅ Got thumbnail from yt-dlp: {thumbnail_url[:80]}...")
+            
+            # Use yt-dlp metadata if oEmbed didn't provide it (common for Instagram)
+            if ytdlp_metadata.title and not metadata.title:
+                metadata = VideoMetadata(
+                    title=ytdlp_metadata.title,
+                    description=ytdlp_metadata.description,
+                    thumbnail=thumbnail_url,
+                    uploader=ytdlp_metadata.uploader or metadata.uploader
+                )
+            elif ytdlp_metadata.description and not metadata.description:
+                # Keep oEmbed title but use yt-dlp description
+                metadata = VideoMetadata(
+                    title=metadata.title,
+                    description=ytdlp_metadata.description,
+                    thumbnail=thumbnail_url,
+                    uploader=ytdlp_metadata.uploader or metadata.uploader
+                )
+        
         # Step 3: Try to download audio and transcribe with Whisper
         combined_content = ""
         audio_file_path = None
@@ -133,7 +162,7 @@ class RecipeExtractor:
             else:
                 print(f"⚠️ Audio download failed: {audio_result.error}")
         
-        # Fallback: Use yt-dlp metadata if Whisper failed
+        # Fallback: Use metadata-only if Whisper failed
         if not combined_content:
             print("📝 Falling back to metadata-only extraction")
             
@@ -144,18 +173,23 @@ class RecipeExtractor:
                     message="Using video metadata..."
                 ))
             
-            # Try to get richer metadata from yt-dlp
-            ytdlp_metadata = await video_service.get_video_metadata_ytdlp(url)
+            # Use ytdlp_metadata if we already fetched it, otherwise fetch now
+            if not ytdlp_metadata:
+                ytdlp_metadata = await video_service.get_video_metadata_ytdlp(url)
             
-            if ytdlp_metadata.title or ytdlp_metadata.description:
+            # Prefer yt-dlp data over oEmbed for fallback
+            title = ytdlp_metadata.title if ytdlp_metadata.title else metadata.title
+            description = ytdlp_metadata.description if ytdlp_metadata.description else metadata.description
+            
+            if title or description:
                 content_parts = []
-                if ytdlp_metadata.title:
-                    content_parts.append(f"VIDEO TITLE: {ytdlp_metadata.title}")
-                if ytdlp_metadata.description:
-                    content_parts.append(f"VIDEO DESCRIPTION: {ytdlp_metadata.description}")
+                if title:
+                    content_parts.append(f"VIDEO TITLE: {title}")
+                if description:
+                    content_parts.append(f"VIDEO DESCRIPTION: {description}")
                 combined_content = "\n\n".join(content_parts)
                 extraction_method = "basic"
-                extraction_quality = "medium" if ytdlp_metadata.description else "low"
+                extraction_quality = "medium" if description else "low"
                 
                 # Update thumbnail if we got one from yt-dlp
                 if ytdlp_metadata.thumbnail and not thumbnail_url:

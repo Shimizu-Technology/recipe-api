@@ -188,7 +188,30 @@ async def start_extraction_job(
             "is_existing": True
         }
     
-    # Create job record
+    # Check for existing extraction job for this URL
+    job_result = await db.execute(
+        select(ExtractionJob).where(
+            or_(ExtractionJob.url == original_url, ExtractionJob.url == url)
+        )
+    )
+    existing_job = job_result.scalar_one_or_none()
+    
+    if existing_job:
+        # If job is still processing, return it
+        if existing_job.status == "processing":
+            return {
+                "job_id": str(existing_job.id),
+                "status": "processing",
+                "message": "Extraction already in progress"
+            }
+        
+        # If job is completed but no recipe found (shouldn't happen), or failed, 
+        # delete the old job and create a new one
+        print(f"🗑️ Cleaning up old job {existing_job.id} (status: {existing_job.status})")
+        await db.delete(existing_job)
+        await db.commit()
+    
+    # Create new job record
     job_id = str(uuid4())
     
     # Store job in database
