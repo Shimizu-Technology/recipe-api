@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
     
+    # OpenRouter (optional - for model benchmarking/switching)
+    openrouter_api_key: str | None = None
+    
     # Clerk Auth
     clerk_secret_key: str | None = None
     clerk_frontend_api: str = "clerk.your-domain.com"  # e.g., "prepared-mole-42.clerk.accounts.dev"

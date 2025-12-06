@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from app.services.video import video_service, VideoMetadata
-from app.services.openai_client import openai_service
+from app.services.openai_client import openai_service  # Still used for Whisper
+from app.services.llm_client import llm_service  # New: Gemini + GPT fallback
 
 
 @dataclass
@@ -208,7 +209,7 @@ class RecipeExtractor:
         if audio_file_path:
             video_service.cleanup_audio_file(audio_file_path)
         
-        # Step 4: Extract recipe with GPT
+        # Step 4: Extract recipe with LLM (Gemini primary, GPT fallback)
         if not combined_content.strip():
             return FullExtractionResult(
                 success=False,
@@ -222,7 +223,7 @@ class RecipeExtractor:
                 message="Extracting recipe with AI..."
             ))
         
-        extraction_result = await openai_service.extract_recipe(
+        extraction_result = await llm_service.extract_recipe(
             source_url=url,
             content=combined_content,
             location=location
