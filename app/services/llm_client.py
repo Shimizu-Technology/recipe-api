@@ -369,6 +369,17 @@ class LLMService:
                 }
             }
         
+        # Sanitize nutrition values - convert floats to integers
+        # (Pydantic schema expects int, but LLMs sometimes return floats like 187.5)
+        nutrition = recipe.get("nutrition", {})
+        for section in ["perServing", "total"]:
+            if section in nutrition and isinstance(nutrition[section], dict):
+                for key in ["calories", "protein", "carbs", "fat", "fiber", "sugar", "sodium"]:
+                    value = nutrition[section].get(key)
+                    if value is not None and isinstance(value, (int, float)):
+                        nutrition[section][key] = int(round(value))
+        recipe["nutrition"] = nutrition
+        
         # Ensure times object
         if "times" not in recipe:
             recipe["times"] = {"prep": None, "cook": None, "total": None}
