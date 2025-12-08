@@ -409,3 +409,220 @@ async def get_available_locations():
         ],
         "default": "Guam"
     }
+
+
+class ReExtractAsyncRequest(BaseModel):
+    """Request to re-extract a recipe asynchronously."""
+    location: str = "Guam"
+
+
+@router.post("/re-extract/{recipe_id}/async")
+async def start_re_extraction_job(
+    recipe_id: UUID,
+    request: ReExtractAsyncRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Start an async re-extraction job for an existing recipe.
+    
+    Returns immediately with a job ID that can be polled for status.
+    Only allowed for recipe owners or admin users.
+    """
+    # Fetch the recipe
+    result = await db.execute(select(Recipe).where(Recipe.id == recipe_id))
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Check permissions: owner or admin
+    is_owner = recipe.user_id == user.id
+    is_admin = user.is_admin
+    
+    if not is_owner and not is_admin:
+        raise HTTPException(
+            status_code=403, 
+            detail="You don't have permission to re-extract this recipe"
+        )
+    
+    # Check if recipe can be re-extracted
+    if not recipe.source_url or recipe.source_url.startswith("manual://"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot re-extract manual recipes. Please edit them directly."
+        )
+    
+    # Check for existing re-extraction job for this recipe
+    job_result = await db.execute(
+        select(ExtractionJob).where(
+            ExtractionJob.url == f"re-extract:{recipe_id}"
+        )
+    )
+    existing_job = job_result.scalar_one_or_none()
+    
+    if existing_job:
+        if existing_job.status == "processing":
+            return {
+                "job_id": str(existing_job.id),
+                "status": "processing",
+                "message": "Re-extraction already in progress"
+            }
+        # Clean up old job
+        await db.delete(existing_job)
+        await db.commit()
+    
+    # Create new job record
+    job_id = str(uuid4())
+    
+    job = ExtractionJob(
+        id=job_id,
+        url=f"re-extract:{recipe_id}",  # Special URL format for re-extraction
+        location=request.location,
+        notes="",
+        status="processing",
+        progress=0,
+        current_step="initializing",
+        message="Starting re-extraction..."
+    )
+    
+    db.add(job)
+    await db.commit()
+    
+    # Start background task
+    background_tasks.add_task(
+        run_re_extraction_job,
+        job_id=job_id,
+        recipe_id=str(recipe_id),
+        source_url=recipe.source_url,
+        location=request.location,
+        user_id=user.id,
+    )
+    
+    return {
+        "job_id": job_id,
+        "status": "processing",
+        "message": "Re-extraction started",
+        "recipe_id": str(recipe_id)
+    }
+
+
+async def run_re_extraction_job(
+    job_id: str,
+    recipe_id: str,
+    source_url: str,
+    location: str,
+    user_id: str,
+):
+    """Background task to run re-extraction and update existing recipe."""
+    from app.db.database import AsyncSessionLocal
+    
+    async with AsyncSessionLocal() as db:
+        try:
+            # Update progress callback
+            async def update_progress(progress):
+                job_result = await db.execute(
+                    select(ExtractionJob).where(ExtractionJob.id == job_id)
+                )
+                job = job_result.scalar_one_or_none()
+                if job:
+                    job.progress = progress.progress
+                    job.current_step = progress.step
+                    job.message = progress.message
+                    job.updated_at = datetime.utcnow()
+                    await db.commit()
+            
+            # Get the existing recipe
+            recipe_result = await db.execute(
+                select(Recipe).where(Recipe.id == recipe_id)
+            )
+            recipe = recipe_result.scalar_one_or_none()
+            
+            if not recipe:
+                raise Exception(f"Recipe {recipe_id} not found")
+            
+            # Preserve original if not already done
+            if not recipe.original_extracted and recipe.extracted:
+                recipe.original_extracted = recipe.extracted.copy()
+                await db.commit()
+            
+            # Run full extraction (with audio) for best quality
+            result = await recipe_extractor.extract(
+                url=source_url,
+                location=location,
+                notes="",
+                progress_callback=update_progress
+            )
+            
+            # Get job record
+            job_result = await db.execute(
+                select(ExtractionJob).where(ExtractionJob.id == job_id)
+            )
+            job = job_result.scalar_one_or_none()
+            
+            if not job:
+                print(f"❌ Re-extraction job {job_id} not found")
+                return
+            
+            if result.success:
+                # Update existing recipe with new extraction
+                recipe.raw_text = result.raw_text
+                recipe.extracted = result.recipe
+                recipe.extraction_method = result.extraction_method
+                recipe.extraction_quality = result.extraction_quality
+                recipe.has_audio_transcript = result.has_audio_transcript
+                await db.commit()
+                
+                # Upload thumbnail to S3 if we got a new one
+                if result.thumbnail_url:
+                    await update_progress(ExtractionProgress(
+                        step="saving",
+                        progress=85,
+                        message="Saving thumbnail..."
+                    ))
+                    s3_url = await storage_service.upload_thumbnail_from_url(
+                        result.thumbnail_url,
+                        str(recipe.id)
+                    )
+                    if s3_url:
+                        recipe.thumbnail_url = s3_url
+                        if recipe.extracted and "media" in recipe.extracted:
+                            recipe.extracted["media"]["thumbnail"] = s3_url
+                        await db.commit()
+                
+                # Update job as completed
+                await update_progress(ExtractionProgress(
+                    step="complete",
+                    progress=100,
+                    message="Recipe re-extracted successfully!"
+                ))
+                
+                job.status = "completed"
+                job.progress = 100
+                job.current_step = "complete"
+                job.message = "Recipe re-extracted successfully!"
+                job.recipe_id = recipe.id
+                job.completed_at = datetime.utcnow()
+            else:
+                # Update job as failed
+                job.status = "failed"
+                job.current_step = "error"
+                job.message = f"Re-extraction failed: {result.error}"
+                job.error_message = result.error
+            
+            job.updated_at = datetime.utcnow()
+            await db.commit()
+            
+        except Exception as e:
+            print(f"❌ Re-extraction job {job_id} failed: {e}")
+            job_result = await db.execute(
+                select(ExtractionJob).where(ExtractionJob.id == job_id)
+            )
+            job = job_result.scalar_one_or_none()
+            if job:
+                job.status = "failed"
+                job.error_message = str(e)
+                job.message = f"Error: {str(e)}"
+                job.updated_at = datetime.utcnow()
+                await db.commit()

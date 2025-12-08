@@ -28,6 +28,12 @@ class ClerkUser(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     image_url: Optional[str] = None
+    role: Optional[str] = None  # From public_metadata (e.g., "admin")
+    
+    @property
+    def is_admin(self) -> bool:
+        """Check if user has admin role."""
+        return self.role == "admin"
 
 
 # Cache the JWKS client to avoid repeated fetches
@@ -66,12 +72,16 @@ def verify_clerk_token(token: str) -> ClerkUser:
         )
         
         # Extract user info from token
+        # public_metadata is included if you've configured your Clerk JWT template
+        public_metadata = payload.get("public_metadata", {}) or {}
+        
         return ClerkUser(
             id=payload.get("sub"),
             email=payload.get("email"),
             first_name=payload.get("first_name"),
             last_name=payload.get("last_name"),
             image_url=payload.get("image_url"),
+            role=public_metadata.get("role"),
         )
         
     except jwt.ExpiredSignatureError:

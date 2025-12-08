@@ -1245,3 +1245,100 @@ async def get_saved_recipes_count(
     count = result.scalar()
     
     return {"count": count}
+
+
+class ReExtractRequest(BaseModel):
+    """Request to re-extract a recipe."""
+    location: str = "Guam"
+
+
+@router.post("/{recipe_id}/re-extract", response_model=RecipeResponse)
+async def re_extract_recipe(
+    recipe_id: UUID,
+    request: ReExtractRequest,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Re-extract a recipe from its source URL.
+    
+    Only allowed for:
+    - Recipe owners (can re-extract their own recipes)
+    - Admin users (can re-extract any recipe) - set role: "admin" in Clerk public_metadata
+    
+    The recipe must have a valid source_url (not manual recipes).
+    Updates the recipe with new extraction data while preserving the original.
+    """
+    from app.services import recipe_extractor, storage_service
+    
+    # Fetch the recipe
+    result = await db.execute(select(Recipe).where(Recipe.id == recipe_id))
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Check permissions: owner or admin (admin role from Clerk public_metadata)
+    is_owner = recipe.user_id == user.id
+    
+    if not is_owner and not user.is_admin:
+        raise HTTPException(
+            status_code=403, 
+            detail="You don't have permission to re-extract this recipe"
+        )
+    
+    # Check if recipe can be re-extracted (has a valid source URL)
+    if not recipe.source_url or recipe.source_url.startswith("manual://"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot re-extract manual recipes. Please edit them directly."
+        )
+    
+    # Store original if not already stored
+    if not recipe.original_extracted:
+        recipe.original_extracted = recipe.extracted.copy() if recipe.extracted else None
+    
+    # Run extraction
+    try:
+        extraction_result = await recipe_extractor.extract(
+            url=recipe.source_url,
+            location=request.location,
+            notes=""  # Don't use old notes
+        )
+        
+        if not extraction_result.success:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Re-extraction failed: {extraction_result.error}"
+            )
+        
+        # Update the recipe with new data
+        recipe.raw_text = extraction_result.raw_text
+        recipe.extracted = extraction_result.recipe
+        recipe.extraction_method = extraction_result.extraction_method
+        recipe.extraction_quality = extraction_result.extraction_quality
+        recipe.has_audio_transcript = extraction_result.has_audio_transcript
+        
+        # Update thumbnail if we got a new one
+        if extraction_result.thumbnail_url:
+            s3_url = await storage_service.upload_thumbnail_from_url(
+                extraction_result.thumbnail_url,
+                str(recipe.id)
+            )
+            if s3_url:
+                recipe.thumbnail_url = s3_url
+                if recipe.extracted and "media" in recipe.extracted:
+                    recipe.extracted["media"]["thumbnail"] = s3_url
+        
+        await db.commit()
+        await db.refresh(recipe)
+        
+        return recipe
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Re-extraction failed: {str(e)}"
+        )

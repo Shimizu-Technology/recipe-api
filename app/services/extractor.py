@@ -41,7 +41,8 @@ class RecipeExtractor:
         url: str,
         location: str = "Guam",
         notes: str = "",
-        progress_callback=None
+        progress_callback=None,
+        fast_mode: bool = False
     ) -> FullExtractionResult:
         """
         Extract a recipe from a video URL.
@@ -51,6 +52,7 @@ class RecipeExtractor:
             location: Location for cost estimation
             notes: Additional user-provided notes
             progress_callback: Optional async callback for progress updates
+            fast_mode: If True, skip audio download and use metadata only (faster for re-extraction)
             
         Returns:
             FullExtractionResult with recipe data
@@ -116,10 +118,19 @@ class RecipeExtractor:
                 )
         
         # Step 3: Try to download audio and transcribe with Whisper
+        # Skip audio download in fast_mode (used for re-extraction)
         combined_content = ""
         audio_file_path = None
         
-        if platform in ["youtube", "tiktok", "instagram"]:
+        if fast_mode:
+            print("⚡ Fast mode: skipping audio download, using metadata only")
+            if progress_callback:
+                await progress_callback(ExtractionProgress(
+                    step="metadata_fast",
+                    progress=35,
+                    message="Using fast metadata extraction..."
+                ))
+        elif platform in ["youtube", "tiktok", "instagram"]:
             if progress_callback:
                 await progress_callback(ExtractionProgress(
                     step="downloading",
