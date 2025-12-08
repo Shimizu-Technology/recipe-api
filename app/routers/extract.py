@@ -1,6 +1,7 @@
 """Recipe extraction API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+import base64
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from pydantic import BaseModel, HttpUrl
@@ -11,6 +12,7 @@ from datetime import datetime
 from app.db import get_db
 from app.models.recipe import Recipe, ExtractionJob, RecipeVersion
 from app.services import recipe_extractor, video_service, storage_service
+from app.services.llm_client import llm_service
 from sqlalchemy import func
 
 
@@ -801,3 +803,181 @@ async def run_re_extraction_job(
                 job.message = f"Error: {str(e)}"
                 job.updated_at = datetime.utcnow()
                 await db.commit()
+
+
+# ============================================================================
+# OCR EXTRACTION ENDPOINT
+# ============================================================================
+
+class OCRExtractionResponse(BaseModel):
+    """Response from OCR extraction."""
+    success: bool
+    recipe: Optional[dict] = None
+    error: Optional[str] = None
+    model_used: Optional[str] = None
+    latency_seconds: Optional[float] = None
+
+
+@router.post("/extract/ocr", response_model=OCRExtractionResponse)
+async def extract_recipe_from_image(
+    image: UploadFile = File(..., description="Image file of a recipe (handwritten or printed)"),
+    location: str = Form(default="Guam", description="Location for cost estimation"),
+):
+    """
+    Extract recipe from an uploaded image using AI vision models.
+    
+    Supports:
+    - Handwritten recipe cards
+    - Printed recipes
+    - Recipe book pages
+    - Screenshots of recipes
+    
+    Uses Gemini 2.0 Flash Vision (primary) with GPT-4o Vision fallback.
+    """
+    print(f"📸 OCR extraction request received")
+    print(f"📍 Location: {location}")
+    print(f"📁 File: {image.filename}, Content-Type: {image.content_type}")
+    
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/jpg"]
+    if image.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed types: {', '.join(allowed_types)}"
+        )
+    
+    # Read and encode image
+    try:
+        image_bytes = await image.read()
+        if len(image_bytes) > 20 * 1024 * 1024:  # 20MB limit
+            raise HTTPException(
+                status_code=400,
+                detail="Image file too large. Maximum size is 20MB."
+            )
+        
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        print(f"🖼️ Image size: {len(image_bytes) // 1024}KB")
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to read image: {str(e)}"
+        )
+    
+    # Extract recipe using vision models
+    result = await llm_service.extract_from_image(
+        image_base64=image_base64,
+        location=location
+    )
+    
+    if result.success:
+        print(f"✅ OCR extraction successful: {result.recipe.get('title', 'Untitled')}")
+        return OCRExtractionResponse(
+            success=True,
+            recipe=result.recipe,
+            model_used=result.model_used,
+            latency_seconds=result.latency_seconds
+        )
+    else:
+        print(f"❌ OCR extraction failed: {result.error}")
+        return OCRExtractionResponse(
+            success=False,
+            error=result.error,
+            model_used=result.model_used,
+            latency_seconds=result.latency_seconds
+        )
+
+
+@router.post("/extract/ocr/multi", response_model=OCRExtractionResponse)
+async def extract_recipe_from_multiple_images(
+    images: list[UploadFile] = File(..., description="Multiple image files of a recipe"),
+    location: str = Form(default="Guam", description="Location for cost estimation"),
+):
+    """
+    Extract recipe from multiple uploaded images using AI vision models.
+    
+    Use this for:
+    - Multi-page cookbook recipes
+    - Front and back of recipe cards
+    - Recipes with separate ingredients/instructions pages
+    
+    All images are analyzed together to extract ONE complete recipe.
+    """
+    print(f"📸 Multi-image OCR extraction request received")
+    print(f"📍 Location: {location}")
+    print(f"🖼️ Number of images: {len(images)}")
+    
+    if len(images) < 1:
+        raise HTTPException(status_code=400, detail="At least one image is required")
+    
+    if len(images) > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 images allowed")
+    
+    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/jpg"]
+    images_base64 = []
+    total_size = 0
+    
+    for i, image in enumerate(images):
+        print(f"   Image {i+1}: {image.filename}, {image.content_type}")
+        
+        # Validate file type
+        if image.content_type not in allowed_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type for image {i+1}. Allowed types: {', '.join(allowed_types)}"
+            )
+        
+        # Read and encode image
+        try:
+            image_bytes = await image.read()
+            size_kb = len(image_bytes) // 1024
+            total_size += size_kb
+            
+            if len(image_bytes) > 20 * 1024 * 1024:  # 20MB per image
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Image {i+1} is too large. Maximum size is 20MB per image."
+                )
+            
+            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+            images_base64.append(image_base64)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to read image {i+1}: {str(e)}"
+            )
+    
+    print(f"📦 Total size: {total_size}KB across {len(images)} images")
+    
+    # Check total size limit (50MB total)
+    if total_size > 50 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail="Total image size too large. Maximum combined size is 50MB."
+        )
+    
+    # Extract recipe using multi-image vision
+    result = await llm_service.extract_from_images(
+        images_base64=images_base64,
+        location=location
+    )
+    
+    if result.success:
+        print(f"✅ Multi-image OCR successful: {result.recipe.get('title', 'Untitled')}")
+        return OCRExtractionResponse(
+            success=True,
+            recipe=result.recipe,
+            model_used=result.model_used,
+            latency_seconds=result.latency_seconds
+        )
+    else:
+        print(f"❌ Multi-image OCR failed: {result.error}")
+        return OCRExtractionResponse(
+            success=False,
+            error=result.error,
+            model_used=result.model_used,
+            latency_seconds=result.latency_seconds
+        )

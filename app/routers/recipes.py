@@ -317,6 +317,7 @@ class ManualRecipeCreate(BaseModel):
     tags: Optional[List[str]] = None
     is_public: bool = True
     nutrition: Optional[ManualNutrition] = None
+    source_type: Optional[str] = "manual"  # Can be "manual" or "photo" (for edited OCR)
 
 
 def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
@@ -422,13 +423,17 @@ async def create_manual_recipe(
     }
     
     # Create the recipe
+    # source_type can be "manual" or "photo" (for edited OCR recipes)
+    source_type = recipe_input.source_type or "manual"
+    source_url = "photo-upload" if source_type == "photo" else "manual://user-created"
+    
     new_recipe = Recipe(
-        source_url="manual://user-created",
-        source_type="manual",
+        source_url=source_url,
+        source_type=source_type,
         raw_text=None,
         extracted=extracted,
         thumbnail_url=None,
-        extraction_method="manual",
+        extraction_method="ocr" if source_type == "photo" else "manual",
         extraction_quality=None,
         has_audio_transcript=False,
         user_id=user.id,
@@ -460,6 +465,52 @@ async def create_manual_recipe(
         except Exception as e:
             print(f"⚠️ Failed to upload image: {e}")
             # Recipe is still created, just without an image
+    
+    return new_recipe
+
+
+class OCRRecipeCreate(BaseModel):
+    """Request to save an OCR-extracted recipe."""
+    extracted: dict  # The full extracted JSON from OCR
+    is_public: bool = True
+
+
+@router.post("/from-ocr", response_model=RecipeResponse)
+async def save_ocr_recipe(
+    ocr_data: OCRRecipeCreate,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Save a recipe extracted via OCR (photo scanning).
+    
+    Accepts the full extracted JSON and saves it as a new recipe.
+    """
+    extracted = ocr_data.extracted
+    
+    # Ensure sourceUrl is set
+    if not extracted.get("sourceUrl"):
+        extracted["sourceUrl"] = "photo-upload"
+    
+    # Create the recipe
+    new_recipe = Recipe(
+        source_url="photo-upload",
+        source_type="photo",
+        raw_text=None,
+        extracted=extracted,
+        thumbnail_url=None,
+        extraction_method="ocr",
+        extraction_quality="good",  # OCR extractions are typically good quality
+        has_audio_transcript=False,
+        user_id=user.id,
+        is_public=ocr_data.is_public,
+    )
+    
+    db.add(new_recipe)
+    await db.commit()
+    await db.refresh(new_recipe)
+    
+    print(f"✅ OCR recipe saved: {extracted.get('title', 'Untitled')} (ID: {new_recipe.id})")
     
     return new_recipe
 

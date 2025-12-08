@@ -60,7 +60,8 @@ User pastes URL → yt-dlp downloads audio → Whisper transcribes
 | Task | Model |
 |------|-------|
 | Transcription | OpenAI Whisper |
-| Recipe Extraction | Gemini 2.0 Flash (primary), GPT-4o-mini (fallback) |
+| Recipe Extraction (Video) | Gemini 2.0 Flash (primary), GPT-4o-mini (fallback) |
+| Recipe Extraction (OCR) | Gemini 2.0 Flash Vision (primary), GPT-4o Vision (fallback) |
 | Recipe Chat | GPT-4o |
 | Tag/Nutrition AI | GPT-4o-mini |
 
@@ -91,7 +92,9 @@ app/
 ### Extraction
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/extract/async` | Start extraction job |
+| POST | `/api/extract/async` | Start extraction job (video URL) |
+| POST | `/api/extract/ocr` | Extract from single image (OCR) |
+| POST | `/api/extract/ocr/multi` | Extract from multiple images (OCR) |
 | POST | `/api/re-extract/{id}/async` | Re-extract with latest AI (owner/admin) |
 | GET | `/api/jobs/{id}` | Get job status |
 | GET | `/api/locations` | Available cost locations |
