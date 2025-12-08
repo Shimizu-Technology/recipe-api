@@ -106,6 +106,55 @@ class CollectionRecipe(Base):
         return f"<CollectionRecipe collection={self.collection_id} recipe={self.recipe_id}>"
 
 
+class RecipeNote(Base):
+    """
+    RecipeNote model - user's private notes on any recipe.
+    
+    Allows users to add personal notes to any recipe (their own or saved from others).
+    Notes are private - only visible to the user who created them.
+    """
+    __tablename__ = "recipe_notes"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(64), nullable=False, index=True)
+    recipe_id = Column(UUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), nullable=False, index=True)
+    note_text = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    # Relationship to recipe
+    recipe = relationship("Recipe")
+    
+    def __repr__(self):
+        return f"<RecipeNote user={self.user_id} recipe={self.recipe_id}>"
+
+
+class RecipeVersion(Base):
+    """
+    RecipeVersion model - tracks all versions of a recipe.
+    
+    Stores snapshots of the recipe data whenever it's edited or re-extracted.
+    Allows users to view history and restore to any previous version.
+    """
+    __tablename__ = "recipe_versions"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    recipe_id = Column(UUID(as_uuid=True), ForeignKey("recipes.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    extracted = Column(JSONB, nullable=False)  # Snapshot of recipe data
+    thumbnail_url = Column(Text, nullable=True)
+    change_type = Column(String(32), nullable=False, default="edit")  # initial, edit, re-extract
+    change_summary = Column(Text, nullable=True)  # Optional description of changes
+    created_by = Column(String(64), nullable=True)  # User who made the change
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationship to recipe
+    recipe = relationship("Recipe", backref="versions")
+    
+    def __repr__(self):
+        return f"<RecipeVersion recipe={self.recipe_id} v{self.version_number}>"
+
+
 class ExtractionJob(Base):
     """
     Extraction job model - matches existing 'extraction_jobs' table in Neon.

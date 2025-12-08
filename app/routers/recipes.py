@@ -9,8 +9,243 @@ from typing import Optional, List, Generic, TypeVar
 import json
 
 from app.db import get_db
-from app.models.recipe import Recipe, SavedRecipe
+from app.models.recipe import Recipe, SavedRecipe, RecipeNote, RecipeVersion
 from app.models.schemas import RecipeResponse, RecipeListItem
+
+
+def generate_change_summary(old_extracted: dict, new_extracted: dict) -> str:
+    """
+    Compare old and new recipe data to generate a detailed human-readable change summary.
+    
+    Shows specific changes like:
+    - Title: "Old" → "New"
+    - Modified: ingredient name
+    - Added: 2 ingredients
+    - Removed: 1 step
+    """
+    if not old_extracted or not new_extracted:
+        return "Recipe updated"
+    
+    changes = []
+    
+    # Compare title
+    old_title = old_extracted.get("title", "")
+    new_title = new_extracted.get("title", "")
+    if old_title != new_title:
+        # Truncate long titles
+        old_short = old_title[:30] + "..." if len(old_title) > 30 else old_title
+        new_short = new_title[:30] + "..." if len(new_title) > 30 else new_title
+        changes.append(f'Title: "{old_short}" → "{new_short}"')
+    
+    # Compare servings
+    old_servings = old_extracted.get("servings")
+    new_servings = new_extracted.get("servings")
+    if old_servings != new_servings:
+        changes.append(f"Servings: {old_servings or 'none'} → {new_servings or 'none'}")
+    
+    # Compare times
+    old_times = old_extracted.get("times", {})
+    new_times = new_extracted.get("times", {})
+    if old_times != new_times:
+        time_changes = []
+        for key, label in [("prep", "prep"), ("cook", "cook"), ("total", "total")]:
+            if old_times.get(key) != new_times.get(key):
+                time_changes.append(label)
+        if time_changes:
+            changes.append(f"Times: {', '.join(time_changes)}")
+    
+    # Compare ingredients in detail
+    old_ingredients = old_extracted.get("ingredients", [])
+    new_ingredients = new_extracted.get("ingredients", [])
+    if old_ingredients != new_ingredients:
+        ingredient_changes = _compare_ingredients(old_ingredients, new_ingredients)
+        changes.extend(ingredient_changes)
+    
+    # Compare steps in detail
+    old_steps = old_extracted.get("steps", [])
+    new_steps = new_extracted.get("steps", [])
+    if old_steps != new_steps:
+        step_changes = _compare_steps(old_steps, new_steps)
+        changes.extend(step_changes)
+    
+    # Compare notes
+    old_notes = old_extracted.get("notes") or ""
+    new_notes = new_extracted.get("notes") or ""
+    if old_notes != new_notes:
+        if not old_notes and new_notes:
+            changes.append("Added notes")
+        elif old_notes and not new_notes:
+            changes.append("Removed notes")
+        else:
+            changes.append("Modified notes")
+    
+    # Compare tags
+    old_tags = set(old_extracted.get("tags") or [])
+    new_tags = set(new_extracted.get("tags") or [])
+    if old_tags != new_tags:
+        added_tags = new_tags - old_tags
+        removed_tags = old_tags - new_tags
+        if added_tags:
+            changes.append(f"Added tags: {', '.join(list(added_tags)[:3])}")
+        if removed_tags:
+            changes.append(f"Removed tags: {', '.join(list(removed_tags)[:3])}")
+    
+    # Compare nutrition
+    old_nutrition = old_extracted.get("nutrition", {}).get("perServing", {})
+    new_nutrition = new_extracted.get("nutrition", {}).get("perServing", {})
+    if old_nutrition != new_nutrition:
+        changes.append("Updated nutrition info")
+    
+    if not changes:
+        return "Minor updates"
+    
+    # Join with newlines for readability (up to 5 changes shown)
+    if len(changes) > 5:
+        return "\n".join(changes[:5]) + f"\n... and {len(changes) - 5} more changes"
+    return "\n".join(changes)
+
+
+def _compare_ingredients(old_ingredients: list, new_ingredients: list) -> list:
+    """Compare ingredient lists and return detailed changes."""
+    changes = []
+    
+    # Build lookup by name for comparison
+    old_by_name = {ing.get("name", "").lower(): ing for ing in old_ingredients}
+    new_by_name = {ing.get("name", "").lower(): ing for ing in new_ingredients}
+    
+    old_names = set(old_by_name.keys())
+    new_names = set(new_by_name.keys())
+    
+    # Find added ingredients
+    added = new_names - old_names
+    if added:
+        if len(added) == 1:
+            name = list(added)[0]
+            # Find the actual name with proper casing
+            for ing in new_ingredients:
+                if ing.get("name", "").lower() == name:
+                    changes.append(f"Added ingredient: {ing.get('name')}")
+                    break
+        else:
+            changes.append(f"Added {len(added)} ingredients")
+    
+    # Find removed ingredients
+    removed = old_names - new_names
+    if removed:
+        if len(removed) == 1:
+            name = list(removed)[0]
+            for ing in old_ingredients:
+                if ing.get("name", "").lower() == name:
+                    changes.append(f"Removed ingredient: {ing.get('name')}")
+                    break
+        else:
+            changes.append(f"Removed {len(removed)} ingredients")
+    
+    # Find modified ingredients (same name but different details)
+    common = old_names & new_names
+    modified_count = 0
+    modified_example = None
+    for name in common:
+        old_ing = old_by_name[name]
+        new_ing = new_by_name[name]
+        if old_ing != new_ing:
+            modified_count += 1
+            if modified_example is None:
+                # Find the actual ingredient name with proper casing
+                for ing in new_ingredients:
+                    if ing.get("name", "").lower() == name:
+                        modified_example = ing.get("name")
+                        break
+    
+    if modified_count > 0:
+        if modified_count == 1 and modified_example:
+            changes.append(f"Modified ingredient: {modified_example}")
+        else:
+            changes.append(f"Modified {modified_count} ingredients")
+    
+    return changes
+
+
+def _compare_steps(old_steps: list, new_steps: list) -> list:
+    """Compare step lists and return detailed changes."""
+    changes = []
+    
+    old_count = len(old_steps)
+    new_count = len(new_steps)
+    
+    if new_count > old_count:
+        changes.append(f"Added {new_count - old_count} step(s)")
+    elif new_count < old_count:
+        changes.append(f"Removed {old_count - new_count} step(s)")
+    
+    # Check for modified steps (comparing by position)
+    min_count = min(old_count, new_count)
+    modified_steps = []
+    for i in range(min_count):
+        if old_steps[i] != new_steps[i]:
+            modified_steps.append(i + 1)  # 1-indexed for display
+    
+    if modified_steps:
+        if len(modified_steps) <= 3:
+            changes.append(f"Modified step(s): {', '.join(map(str, modified_steps))}")
+        else:
+            changes.append(f"Modified {len(modified_steps)} steps")
+    
+    return changes
+
+
+async def create_recipe_version(
+    db: AsyncSession,
+    recipe: Recipe,
+    change_type: str,
+    user_id: str,
+    change_summary: str = None,
+    new_extracted: dict = None
+) -> RecipeVersion:
+    """
+    Create a new version snapshot of a recipe.
+    
+    Args:
+        db: Database session
+        recipe: The recipe to snapshot (current state before changes)
+        change_type: Type of change ('initial', 'edit', 're-extract')
+        user_id: ID of user making the change
+        change_summary: Optional description of what changed (auto-generated if new_extracted provided)
+        new_extracted: The new extracted data (for generating change summary)
+    
+    Returns:
+        The created RecipeVersion
+    """
+    # Get the next version number
+    result = await db.execute(
+        select(func.max(RecipeVersion.version_number))
+        .where(RecipeVersion.recipe_id == recipe.id)
+    )
+    max_version = result.scalar() or 0
+    next_version = max_version + 1
+    
+    # Auto-generate change summary if new_extracted is provided
+    if change_summary is None and new_extracted is not None:
+        change_summary = generate_change_summary(
+            recipe.extracted if recipe.extracted else {},
+            new_extracted
+        )
+    elif change_summary is None:
+        change_summary = f"Recipe {change_type}"
+    
+    # Create the version
+    version = RecipeVersion(
+        recipe_id=recipe.id,
+        version_number=next_version,
+        extracted=dict(recipe.extracted) if recipe.extracted else {},
+        thumbnail_url=recipe.thumbnail_url,
+        change_type=change_type,
+        change_summary=change_summary,
+        created_by=user_id,
+    )
+    db.add(version)
+    
+    return version
 from app.auth import get_current_user, get_optional_user, ClerkUser
 from app.services.storage import storage_service
 
@@ -829,6 +1064,7 @@ async def edit_recipe(
     """
     Fully edit a recipe's content.
     
+    Creates a version snapshot before applying changes.
     For extracted recipes: saves original to original_extracted on first edit.
     For manual recipes: just updates directly.
     Only the recipe owner can edit.
@@ -845,11 +1081,7 @@ async def edit_recipe(
     if recipe.user_id != user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own recipes")
     
-    # For extracted recipes, save original on first edit
-    if recipe.source_type != "manual" and recipe.original_extracted is None:
-        recipe.original_extracted = dict(recipe.extracted) if recipe.extracted else {}
-    
-    # Build the new extracted structure
+    # Build the new extracted structure FIRST (for change comparison)
     ingredients_list = [
         {
             "name": ing.name,
@@ -901,6 +1133,19 @@ async def edit_recipe(
         },
     }
     
+    # Create a version snapshot BEFORE applying changes (with change comparison)
+    await create_recipe_version(
+        db=db,
+        recipe=recipe,
+        change_type="edit",
+        user_id=user.id,
+        new_extracted=new_extracted  # For generating change summary
+    )
+    
+    # For extracted recipes, save original on first edit
+    if recipe.source_type != "manual" and recipe.original_extracted is None:
+        recipe.original_extracted = dict(recipe.extracted) if recipe.extracted else {}
+    
     recipe.extracted = new_extracted
     
     # Update is_public if provided
@@ -924,6 +1169,7 @@ async def edit_recipe_with_image(
     """
     Edit a recipe with optional image upload.
     
+    Creates a version snapshot before applying changes.
     Accepts multipart form data with:
     - recipe_data: JSON string of the edit details
     - image: Optional new image file for the recipe thumbnail
@@ -949,11 +1195,7 @@ async def edit_recipe_with_image(
     if recipe.user_id != user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own recipes")
     
-    # For extracted recipes, save original on first edit
-    if recipe.source_type != "manual" and recipe.original_extracted is None:
-        recipe.original_extracted = dict(recipe.extracted) if recipe.extracted else {}
-    
-    # Handle image upload
+    # Handle image upload first
     thumbnail_url = recipe.thumbnail_url
     if image:
         try:
@@ -965,7 +1207,7 @@ async def edit_recipe_with_image(
             print(f"Failed to upload image: {e}")
             # Continue without updating the image
     
-    # Build the new extracted structure
+    # Build the new extracted structure FIRST (for change comparison)
     ingredients_list = [
         {
             "name": ing.name,
@@ -1015,6 +1257,19 @@ async def edit_recipe_with_image(
             "total": old_extracted.get("nutrition", {}).get("total", {}),
         },
     }
+    
+    # Create a version snapshot BEFORE applying changes (with change comparison)
+    await create_recipe_version(
+        db=db,
+        recipe=recipe,
+        change_type="edit",
+        user_id=user.id,
+        new_extracted=new_extracted  # For generating change summary
+    )
+    
+    # For extracted recipes, save original on first edit
+    if recipe.source_type != "manual" and recipe.original_extracted is None:
+        recipe.original_extracted = dict(recipe.extracted) if recipe.extracted else {}
     
     recipe.extracted = new_extracted
     recipe.thumbnail_url = thumbnail_url
@@ -1252,6 +1507,22 @@ class ReExtractRequest(BaseModel):
     location: str = "Guam"
 
 
+class RecipeNoteRequest(BaseModel):
+    """Request to create/update a personal note on a recipe."""
+    note_text: str
+
+
+class RecipeNoteResponse(BaseModel):
+    """Response with a recipe note."""
+    id: UUID
+    recipe_id: UUID
+    note_text: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
 @router.post("/{recipe_id}/re-extract", response_model=RecipeResponse)
 async def re_extract_recipe(
     recipe_id: UUID,
@@ -1294,6 +1565,10 @@ async def re_extract_recipe(
             detail="Cannot re-extract manual recipes. Please edit them directly."
         )
     
+    # Save the old extracted data BEFORE extraction for comparison
+    old_extracted = dict(recipe.extracted) if recipe.extracted else {}
+    old_thumbnail = recipe.thumbnail_url
+    
     # Store original if not already stored
     if not recipe.original_extracted:
         recipe.original_extracted = recipe.extracted.copy() if recipe.extracted else None
@@ -1312,9 +1587,37 @@ async def re_extract_recipe(
                 detail=f"Re-extraction failed: {extraction_result.error}"
             )
         
+        new_extracted = extraction_result.recipe
+        
+        # Create version snapshot with comparison AFTER we have the new data
+        # We store the OLD state and compare to NEW state for the summary
+        change_summary = generate_change_summary(old_extracted, new_extracted)
+        if change_summary == "Minor updates":
+            change_summary = "Re-extracted with AI (no significant changes detected)"
+        else:
+            change_summary = f"Re-extracted with AI:\n{change_summary}"
+        
+        # Get the next version number
+        result = await db.execute(
+            select(func.max(RecipeVersion.version_number))
+            .where(RecipeVersion.recipe_id == recipe.id)
+        )
+        max_version = result.scalar() or 0
+        
+        version = RecipeVersion(
+            recipe_id=recipe.id,
+            version_number=max_version + 1,
+            extracted=old_extracted,  # Store the OLD state
+            thumbnail_url=old_thumbnail,
+            change_type="re-extract",
+            change_summary=change_summary,
+            created_by=user.id,
+        )
+        db.add(version)
+        
         # Update the recipe with new data
         recipe.raw_text = extraction_result.raw_text
-        recipe.extracted = extraction_result.recipe
+        recipe.extracted = new_extracted
         recipe.extraction_method = extraction_result.extraction_method
         recipe.extraction_quality = extraction_result.extraction_quality
         recipe.has_audio_transcript = extraction_result.has_audio_transcript
@@ -1342,3 +1645,341 @@ async def re_extract_recipe(
             status_code=500,
             detail=f"Re-extraction failed: {str(e)}"
         )
+
+
+# ============================================================
+# Personal Recipe Notes
+# ============================================================
+
+@router.get("/{recipe_id}/notes", response_model=Optional[RecipeNoteResponse])
+async def get_recipe_note(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Get the current user's personal note for a recipe.
+    
+    Returns the note if it exists, otherwise null.
+    Users can add notes to any recipe they can view (own or public).
+    """
+    # First verify the recipe exists and user can access it
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # User must either own the recipe or it must be public
+    if not recipe.is_public and recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Get the user's note for this recipe
+    result = await db.execute(
+        select(RecipeNote).where(
+            RecipeNote.user_id == user.id,
+            RecipeNote.recipe_id == recipe_id
+        )
+    )
+    note = result.scalar_one_or_none()
+    
+    if not note:
+        return None
+    
+    return RecipeNoteResponse(
+        id=note.id,
+        recipe_id=note.recipe_id,
+        note_text=note.note_text,
+        created_at=note.created_at.isoformat() if note.created_at else None,
+        updated_at=note.updated_at.isoformat() if note.updated_at else None,
+    )
+
+
+@router.put("/{recipe_id}/notes", response_model=RecipeNoteResponse)
+async def update_recipe_note(
+    recipe_id: UUID,
+    request: RecipeNoteRequest,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Create or update the current user's personal note for a recipe.
+    
+    Notes are private - only visible to the user who created them.
+    Users can add notes to any recipe they can view (own or public).
+    """
+    # First verify the recipe exists and user can access it
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # User must either own the recipe or it must be public
+    if not recipe.is_public and recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Check if note already exists
+    result = await db.execute(
+        select(RecipeNote).where(
+            RecipeNote.user_id == user.id,
+            RecipeNote.recipe_id == recipe_id
+        )
+    )
+    note = result.scalar_one_or_none()
+    
+    if note:
+        # Update existing note
+        note.note_text = request.note_text
+    else:
+        # Create new note
+        note = RecipeNote(
+            user_id=user.id,
+            recipe_id=recipe_id,
+            note_text=request.note_text
+        )
+        db.add(note)
+    
+    await db.commit()
+    await db.refresh(note)
+    
+    return RecipeNoteResponse(
+        id=note.id,
+        recipe_id=note.recipe_id,
+        note_text=note.note_text,
+        created_at=note.created_at.isoformat() if note.created_at else None,
+        updated_at=note.updated_at.isoformat() if note.updated_at else None,
+    )
+
+
+@router.delete("/{recipe_id}/notes")
+async def delete_recipe_note(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Delete the current user's personal note for a recipe.
+    """
+    result = await db.execute(
+        select(RecipeNote).where(
+            RecipeNote.user_id == user.id,
+            RecipeNote.recipe_id == recipe_id
+        )
+    )
+    note = result.scalar_one_or_none()
+    
+    if not note:
+        return {"deleted": False, "message": "Note not found"}
+    
+    await db.delete(note)
+    await db.commit()
+    
+    return {"deleted": True, "message": "Note deleted"}
+
+
+# ============================================================
+# Recipe Version History
+# ============================================================
+
+class RecipeVersionResponse(BaseModel):
+    """Response with a recipe version."""
+    id: UUID
+    recipe_id: UUID
+    version_number: int
+    change_type: str
+    change_summary: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: Optional[str] = None
+    # Include title from extracted for display
+    title: Optional[str] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+@router.get("/{recipe_id}/versions", response_model=List[RecipeVersionResponse])
+async def get_recipe_versions(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Get all versions of a recipe.
+    
+    Only accessible by the recipe owner.
+    Returns versions in reverse chronological order (newest first).
+    """
+    # First verify the recipe exists and user owns it
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Only owner can view version history
+    if recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the recipe owner can view version history")
+    
+    # Get all versions
+    result = await db.execute(
+        select(RecipeVersion)
+        .where(RecipeVersion.recipe_id == recipe_id)
+        .order_by(RecipeVersion.version_number.desc())
+    )
+    versions = result.scalars().all()
+    
+    return [
+        RecipeVersionResponse(
+            id=v.id,
+            recipe_id=v.recipe_id,
+            version_number=v.version_number,
+            change_type=v.change_type,
+            change_summary=v.change_summary,
+            created_by=v.created_by,
+            created_at=v.created_at.isoformat() if v.created_at else None,
+            title=v.extracted.get("title") if v.extracted else None,
+        )
+        for v in versions
+    ]
+
+
+@router.get("/{recipe_id}/versions/{version_id}")
+async def get_recipe_version_detail(
+    recipe_id: UUID,
+    version_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Get full details of a specific version.
+    
+    Returns the complete extracted data for that version.
+    """
+    # First verify the recipe exists and user owns it
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    if recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the recipe owner can view version history")
+    
+    # Get the specific version
+    result = await db.execute(
+        select(RecipeVersion).where(
+            RecipeVersion.id == version_id,
+            RecipeVersion.recipe_id == recipe_id
+        )
+    )
+    version = result.scalar_one_or_none()
+    
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+    
+    return {
+        "id": str(version.id),
+        "recipe_id": str(version.recipe_id),
+        "version_number": version.version_number,
+        "extracted": version.extracted,
+        "thumbnail_url": version.thumbnail_url,
+        "change_type": version.change_type,
+        "change_summary": version.change_summary,
+        "created_by": version.created_by,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+    }
+
+
+@router.post("/{recipe_id}/versions/{version_id}/restore", response_model=RecipeResponse)
+async def restore_recipe_version(
+    recipe_id: UUID,
+    version_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Restore a recipe to a specific version.
+    
+    Creates a new version snapshot of the current state before restoring.
+    """
+    # First verify the recipe exists and user owns it
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    if recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the recipe owner can restore versions")
+    
+    # Get the version to restore
+    result = await db.execute(
+        select(RecipeVersion).where(
+            RecipeVersion.id == version_id,
+            RecipeVersion.recipe_id == recipe_id
+        )
+    )
+    version_to_restore = result.scalar_one_or_none()
+    
+    if not version_to_restore:
+        raise HTTPException(status_code=404, detail="Version not found")
+    
+    # Create a version snapshot of current state BEFORE restoring
+    await create_recipe_version(
+        db=db,
+        recipe=recipe,
+        change_type="edit",
+        user_id=user.id,
+        change_summary=f"Before restoring to version {version_to_restore.version_number}"
+    )
+    
+    # Restore the recipe to the selected version
+    recipe.extracted = version_to_restore.extracted
+    if version_to_restore.thumbnail_url:
+        recipe.thumbnail_url = version_to_restore.thumbnail_url
+    
+    await db.commit()
+    await db.refresh(recipe)
+    
+    return recipe
+
+
+@router.get("/{recipe_id}/versions/count")
+async def get_recipe_version_count(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Get the count of versions for a recipe.
+    """
+    # First verify the recipe exists and user owns it
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    if recipe.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the recipe owner can view version history")
+    
+    # Get version count
+    result = await db.execute(
+        select(func.count(RecipeVersion.id))
+        .where(RecipeVersion.recipe_id == recipe_id)
+    )
+    count = result.scalar() or 0
+    
+    return {"count": count}

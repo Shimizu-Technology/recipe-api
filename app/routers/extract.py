@@ -9,8 +9,156 @@ from uuid import UUID, uuid4
 from datetime import datetime
 
 from app.db import get_db
-from app.models.recipe import Recipe, ExtractionJob
+from app.models.recipe import Recipe, ExtractionJob, RecipeVersion
 from app.services import recipe_extractor, video_service, storage_service
+from sqlalchemy import func
+
+
+def _generate_reextract_change_summary(old_extracted: dict, new_extracted: dict) -> str:
+    """Generate a detailed change summary for re-extraction."""
+    if not old_extracted or not new_extracted:
+        return "Re-extracted with AI"
+    
+    changes = []
+    
+    # Compare title
+    old_title = old_extracted.get("title", "")
+    new_title = new_extracted.get("title", "")
+    if old_title != new_title:
+        old_short = old_title[:30] + "..." if len(old_title) > 30 else old_title
+        new_short = new_title[:30] + "..." if len(new_title) > 30 else new_title
+        changes.append(f'Title: "{old_short}" → "{new_short}"')
+    
+    # Compare servings
+    old_servings = old_extracted.get("servings")
+    new_servings = new_extracted.get("servings")
+    if old_servings != new_servings:
+        changes.append(f"Servings: {old_servings or 'none'} → {new_servings or 'none'}")
+    
+    # Compare ingredients in detail
+    old_ingredients = old_extracted.get("ingredients", [])
+    new_ingredients = new_extracted.get("ingredients", [])
+    if old_ingredients != new_ingredients:
+        ing_changes = _compare_ingredients_detail(old_ingredients, new_ingredients)
+        changes.extend(ing_changes)
+    
+    # Compare steps in detail
+    old_steps = old_extracted.get("steps", [])
+    new_steps = new_extracted.get("steps", [])
+    if old_steps != new_steps:
+        step_changes = _compare_steps_detail(old_steps, new_steps)
+        changes.extend(step_changes)
+    
+    # Compare times
+    old_times = old_extracted.get("times", {})
+    new_times = new_extracted.get("times", {})
+    if old_times != new_times:
+        time_changes = []
+        for key, label in [("prep", "prep"), ("cook", "cook"), ("total", "total")]:
+            if old_times.get(key) != new_times.get(key):
+                time_changes.append(label)
+        if time_changes:
+            changes.append(f"Times: {', '.join(time_changes)}")
+    
+    # Compare nutrition
+    old_nutrition = old_extracted.get("nutrition", {}).get("perServing", {})
+    new_nutrition = new_extracted.get("nutrition", {}).get("perServing", {})
+    if old_nutrition != new_nutrition:
+        changes.append("Updated nutrition info")
+    
+    if not changes:
+        return "Re-extracted with AI (no significant changes)"
+    
+    # Limit to 6 changes to avoid overly long summaries
+    if len(changes) > 6:
+        return "Re-extracted with AI:\n" + "\n".join(changes[:6]) + f"\n... and {len(changes) - 6} more"
+    
+    return "Re-extracted with AI:\n" + "\n".join(changes)
+
+
+def _compare_ingredients_detail(old_ingredients: list, new_ingredients: list) -> list:
+    """Compare ingredient lists and return detailed changes."""
+    changes = []
+    
+    # Build lookup by name for comparison
+    old_by_name = {ing.get("name", "").lower(): ing for ing in old_ingredients}
+    new_by_name = {ing.get("name", "").lower(): ing for ing in new_ingredients}
+    
+    old_names = set(old_by_name.keys())
+    new_names = set(new_by_name.keys())
+    
+    # Find added ingredients
+    added = new_names - old_names
+    if added:
+        if len(added) <= 2:
+            for name in list(added)[:2]:
+                for ing in new_ingredients:
+                    if ing.get("name", "").lower() == name:
+                        changes.append(f"Added: {ing.get('name')}")
+                        break
+        else:
+            changes.append(f"Added {len(added)} ingredients")
+    
+    # Find removed ingredients
+    removed = old_names - new_names
+    if removed:
+        if len(removed) <= 2:
+            for name in list(removed)[:2]:
+                for ing in old_ingredients:
+                    if ing.get("name", "").lower() == name:
+                        changes.append(f"Removed: {ing.get('name')}")
+                        break
+        else:
+            changes.append(f"Removed {len(removed)} ingredients")
+    
+    # Find modified ingredients
+    common = old_names & new_names
+    modified = []
+    for name in common:
+        old_ing = old_by_name[name]
+        new_ing = new_by_name[name]
+        if old_ing != new_ing:
+            for ing in new_ingredients:
+                if ing.get("name", "").lower() == name:
+                    modified.append(ing.get("name"))
+                    break
+    
+    if modified:
+        if len(modified) <= 2:
+            for name in modified[:2]:
+                changes.append(f"Modified: {name}")
+        else:
+            changes.append(f"Modified {len(modified)} ingredients")
+    
+    return changes
+
+
+def _compare_steps_detail(old_steps: list, new_steps: list) -> list:
+    """Compare step lists and return detailed changes."""
+    changes = []
+    
+    old_count = len(old_steps)
+    new_count = len(new_steps)
+    
+    if new_count > old_count:
+        changes.append(f"Added {new_count - old_count} step(s)")
+    elif new_count < old_count:
+        changes.append(f"Removed {old_count - new_count} step(s)")
+    
+    # Check for modified steps
+    min_count = min(old_count, new_count)
+    modified_steps = []
+    for i in range(min_count):
+        if old_steps[i] != new_steps[i]:
+            modified_steps.append(i + 1)
+    
+    if modified_steps:
+        if len(modified_steps) <= 3:
+            changes.append(f"Modified step(s): {', '.join(map(str, modified_steps))}")
+        else:
+            changes.append(f"Modified {len(modified_steps)} steps")
+    
+    return changes
 from app.services.extractor import ExtractionProgress
 from app.auth import get_current_user, ClerkUser
 
@@ -542,6 +690,10 @@ async def run_re_extraction_job(
             if not recipe:
                 raise Exception(f"Recipe {recipe_id} not found")
             
+            # Save old state BEFORE extraction for version comparison
+            old_extracted = dict(recipe.extracted) if recipe.extracted else {}
+            old_thumbnail = recipe.thumbnail_url
+            
             # Preserve original if not already done
             if not recipe.original_extracted and recipe.extracted:
                 recipe.original_extracted = recipe.extracted.copy()
@@ -566,9 +718,32 @@ async def run_re_extraction_job(
                 return
             
             if result.success:
+                new_extracted = result.recipe
+                
+                # Generate change summary comparing old vs new
+                change_summary = _generate_reextract_change_summary(old_extracted, new_extracted)
+                
+                # Create version snapshot with OLD state and change comparison
+                version_result = await db.execute(
+                    select(func.max(RecipeVersion.version_number))
+                    .where(RecipeVersion.recipe_id == recipe.id)
+                )
+                max_version = version_result.scalar() or 0
+                
+                version = RecipeVersion(
+                    recipe_id=recipe.id,
+                    version_number=max_version + 1,
+                    extracted=old_extracted,  # Store OLD state
+                    thumbnail_url=old_thumbnail,
+                    change_type="re-extract",
+                    change_summary=change_summary,
+                    created_by=user_id,
+                )
+                db.add(version)
+                
                 # Update existing recipe with new extraction
                 recipe.raw_text = result.raw_text
-                recipe.extracted = result.recipe
+                recipe.extracted = new_extracted
                 recipe.extraction_method = result.extraction_method
                 recipe.extraction_quality = result.extraction_quality
                 recipe.has_audio_transcript = result.has_audio_transcript

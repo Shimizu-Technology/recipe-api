@@ -112,6 +112,20 @@ app/
 | DELETE | `/api/recipes/{id}/save` | Remove bookmark |
 | POST | `/api/recipes/{id}/restore` | Restore original version |
 
+### Personal Notes
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/recipes/{id}/notes` | Get your note for a recipe |
+| PUT | `/api/recipes/{id}/notes` | Create/update your note |
+| DELETE | `/api/recipes/{id}/notes` | Delete your note |
+
+### Version History
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/recipes/{id}/versions` | List all versions |
+| GET | `/api/recipes/{id}/versions/{vid}` | Get specific version |
+| POST | `/api/recipes/{id}/versions/{vid}/restore` | Restore to version |
+
 ### Grocery List
 | Method | Endpoint | Description |
 |--------|----------|-------------|
