@@ -78,7 +78,8 @@ app/
 │   ├── extract.py    # Extraction & job status
 │   ├── recipes.py    # CRUD, search, share, chat
 │   ├── grocery.py    # Grocery list management
-│   └── collections.py
+│   ├── collections.py
+│   └── meal_plans.py # Meal planning
 └── services/         # Business logic
     ├── extractor.py  # Main extraction orchestrator
     ├── video.py      # yt-dlp audio download
@@ -145,6 +146,18 @@ app/
 | POST | `/api/collections` | Create collection |
 | POST | `/api/collections/{id}/recipes` | Add recipe |
 | DELETE | `/api/collections/{id}/recipes/{rid}` | Remove recipe |
+
+### Meal Planning
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/meal-plans/week` | Get week's meal plan |
+| GET | `/api/meal-plans/day` | Get day's meal plan |
+| POST | `/api/meal-plans/` | Add meal to plan |
+| PUT | `/api/meal-plans/{id}` | Update meal entry |
+| DELETE | `/api/meal-plans/{id}` | Remove meal |
+| DELETE | `/api/meal-plans/day/{date}` | Clear day |
+| POST | `/api/meal-plans/to-grocery` | Add plan to grocery |
+| POST | `/api/meal-plans/copy-week` | Copy week |
 
 ## Admin Setup
 
