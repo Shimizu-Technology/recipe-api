@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     # Optional
     ig_oembed_token: str | None = None
     
+    # Instagram cookies (for yt-dlp authentication)
+    # Can be either a file path or the raw cookie content
+    instagram_cookies: str | None = None
+    
     # Environment
     environment: str = "development"
     

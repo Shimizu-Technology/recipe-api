@@ -173,6 +173,11 @@ class RecipeExtractor:
                     print(f"⚠️ Whisper failed: {transcription.error}")
             else:
                 print(f"⚠️ Audio download failed: {audio_result.error}")
+                
+                # Check for Instagram-specific auth error
+                if audio_result.error == "INSTAGRAM_AUTH_REQUIRED":
+                    # Don't give up yet - try metadata-only, but flag it
+                    print("📝 Instagram requires login - trying metadata-only extraction")
         
         # Fallback: Use metadata-only if Whisper failed
         if not combined_content:
@@ -222,6 +227,15 @@ class RecipeExtractor:
         
         # Step 4: Extract recipe with LLM (Gemini primary, GPT fallback)
         if not combined_content.strip():
+            # Provide platform-specific error messages
+            if platform == "instagram":
+                return FullExtractionResult(
+                    success=False,
+                    error="Instagram requires login to access this content. Try one of these alternatives:\n\n"
+                          "• Use Photo Scan to capture the recipe from a screenshot\n"
+                          "• Try a TikTok or YouTube video instead\n"
+                          "• If the recipe is in the caption, copy it to the Notes field and try again"
+                )
             return FullExtractionResult(
                 success=False,
                 error="No content could be extracted from the video"

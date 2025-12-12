@@ -164,6 +164,37 @@ class VideoService:
         
         return VideoMetadata()
     
+    def _get_instagram_cookies_path(self) -> Optional[str]:
+        """
+        Get path to Instagram cookies file.
+        
+        If INSTAGRAM_COOKIES env var contains cookie content (starts with '# Netscape'),
+        write it to a temp file and return the path.
+        If it's a file path, return it directly.
+        """
+        cookies = settings.instagram_cookies
+        if not cookies:
+            return None
+        
+        # Check if it's raw cookie content vs a file path
+        if cookies.strip().startswith("# Netscape") or cookies.strip().startswith("#HttpOnly"):
+            # It's cookie content - write to temp file
+            cookies_path = "/tmp/instagram_cookies.txt"
+            try:
+                with open(cookies_path, "w") as f:
+                    f.write(cookies)
+                return cookies_path
+            except Exception as e:
+                print(f"⚠️ Failed to write Instagram cookies: {e}")
+                return None
+        else:
+            # It's a file path
+            if os.path.exists(cookies):
+                return cookies
+            else:
+                print(f"⚠️ Instagram cookies file not found: {cookies}")
+                return None
+
     async def download_audio(self, url: str) -> AudioExtractionResult:
         """
         Download audio from video using yt-dlp.
@@ -175,6 +206,9 @@ class VideoService:
         # Create a temp directory for the audio file
         temp_dir = tempfile.mkdtemp(prefix="recipe-audio-")
         output_template = os.path.join(temp_dir, "audio.%(ext)s")
+        
+        # Detect platform for Instagram-specific handling
+        platform = self.detect_platform(url)
         
         try:
             # Build yt-dlp command
@@ -188,6 +222,16 @@ class VideoService:
                 "--quiet",
                 url
             ]
+            
+            # Add cookies for Instagram if configured
+            if platform == "instagram":
+                cookies_path = self._get_instagram_cookies_path()
+                if cookies_path:
+                    command.insert(-1, "--cookies")  # Insert before URL
+                    command.insert(-1, cookies_path)
+                    print(f"🍪 Using Instagram cookies from: {cookies_path}")
+                else:
+                    print("⚠️ Instagram extraction may fail without cookies")
             
             print(f"🎵 Executing: {' '.join(command)}")
             
@@ -206,6 +250,14 @@ class VideoService:
             if process.returncode != 0:
                 error_msg = stderr.decode() if stderr else "Unknown error"
                 print(f"❌ yt-dlp failed: {error_msg}")
+                
+                # Check for Instagram-specific errors
+                if platform == "instagram" and ("login required" in error_msg.lower() or "rate-limit" in error_msg.lower()):
+                    return AudioExtractionResult(
+                        success=False,
+                        error="INSTAGRAM_AUTH_REQUIRED"
+                    )
+                
                 return AudioExtractionResult(
                     success=False,
                     error=f"yt-dlp failed: {error_msg}"
@@ -268,13 +320,26 @@ class VideoService:
     
     async def get_video_metadata_ytdlp(self, url: str) -> VideoMetadata:
         """Get video metadata using yt-dlp (no download)."""
+        platform = self.detect_platform(url)
+        
         try:
-            process = await asyncio.create_subprocess_exec(
+            command = [
                 "yt-dlp",
                 "--dump-json",
                 "--no-download",
                 "--quiet",
                 url,
+            ]
+            
+            # Add cookies for Instagram if configured
+            if platform == "instagram":
+                cookies_path = self._get_instagram_cookies_path()
+                if cookies_path:
+                    command.insert(-1, "--cookies")
+                    command.insert(-1, cookies_path)
+            
+            process = await asyncio.create_subprocess_exec(
+                *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
