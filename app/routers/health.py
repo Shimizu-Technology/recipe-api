@@ -34,3 +34,15 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         database=db_status,
     )
 
+
+@router.get("/sentry-debug")
+async def trigger_error():
+    """
+    Test endpoint to verify Sentry is working.
+    Triggers a division by zero error that gets captured by Sentry.
+    
+    Only use for testing - will throw an error!
+    """
+    division_by_zero = 1 / 0
+    return {"this": "won't be reached"}
+

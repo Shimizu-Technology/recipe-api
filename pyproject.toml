@@ -28,6 +28,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyjwt>=2.10.1",
     "cryptography>=46.0.3",
+    # Error Monitoring
+    "sentry-sdk[fastapi]>=2.0.0",
 ]
 
 [project.optional-dependencies]

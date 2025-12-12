@@ -1,12 +1,31 @@
 """Recipe Extractor API - FastAPI Application."""
 
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import recipes_router, health_router, extract_router, grocery_router, chat_router, users_router, collections_router, meal_plans_router
 
 settings = get_settings()
+
+# Initialize Sentry for error monitoring
+if settings.sentry_dsn:
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        environment=settings.environment,
+        # Performance monitoring (20% sample - cost-effective for production)
+        traces_sample_rate=0.2,
+        # Profiling (10% sample)
+        profiles_sample_rate=0.1,
+        enable_tracing=True,
+        # Don't send PII
+        send_default_pii=False,
+    )
+    print(f"📊 Sentry initialized for {settings.environment}")
+else:
+    print("📊 Sentry not configured (no SENTRY_DSN)")
+
+from app.routers import recipes_router, health_router, extract_router, grocery_router, chat_router, users_router, collections_router, meal_plans_router
 
 # Create FastAPI app
 app = FastAPI(

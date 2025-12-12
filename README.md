@@ -45,9 +45,48 @@ AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=us-east-1
 S3_BUCKET_NAME=your-bucket-name
 
+# Instagram Authentication (for video extraction)
+# Required for Instagram videos - export cookies from logged-in browser
+# Can be raw cookie content or path to cookies.txt file
+INSTAGRAM_COOKIES=# Netscape HTTP Cookie File...
+
+# Sentry Error Monitoring (optional but recommended)
+# Get DSN from: Sentry Dashboard → hafa-recipes-api → Settings → Client Keys
+SENTRY_DSN=https://xxx@xxx.ingest.sentry.io/xxx
+
 # Optional
 ENVIRONMENT=development
 ```
+
+## Error Monitoring (Sentry)
+
+Sentry captures errors, performance data, and Instagram auth failures.
+
+### Setup
+1. Create a Sentry project for FastAPI (`hafa-recipes-api`)
+2. Copy the DSN to your `.env` file
+3. Add `SENTRY_DSN` to Render environment variables for production
+
+### Testing
+Visit `http://localhost:8000/sentry-debug` to trigger a test error.
+
+### What's Monitored
+- All unhandled exceptions
+- Instagram extraction failures (tagged with `platform:instagram`)
+- API performance (20% sampled)
+
+## Instagram Cookie Setup
+
+Instagram requires authentication to extract videos. To enable:
+
+1. **Install browser extension**: [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/)
+2. **Log into Instagram** in your browser
+3. **Go to instagram.com** and export cookies with the extension
+4. **Add to Render**: Paste entire content as `INSTAGRAM_COOKIES` environment variable
+
+**Expiration**: Cookies last ~1 year. Refresh when you see "login required" errors in logs.
+
+**Security**: Use a dedicated Instagram account if concerned about flagging.
 
 ## How It Works
 

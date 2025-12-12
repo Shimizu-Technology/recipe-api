@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
+import sentry_sdk
+
 from app.services.video import video_service, VideoMetadata
 from app.services.openai_client import openai_service  # Still used for Whisper
 from app.services.llm_client import llm_service  # New: Gemini + GPT fallback
@@ -229,6 +231,22 @@ class RecipeExtractor:
         if not combined_content.strip():
             # Provide platform-specific error messages
             if platform == "instagram":
+                # Report Instagram auth failure to Sentry for monitoring
+                sentry_sdk.capture_message(
+                    "Instagram extraction failed - auth required",
+                    level="warning",
+                    extras={
+                        "url": url,
+                        "platform": platform,
+                        "has_cookies": video_service._get_instagram_cookies_path() is not None,
+                    },
+                    tags={
+                        "platform": "instagram",
+                        "error_type": "auth_required",
+                    }
+                )
+                print("⚠️ Instagram auth failure reported to Sentry")
+                
                 return FullExtractionResult(
                     success=False,
                     error="Instagram requires login to access this content. Try one of these alternatives:\n\n"

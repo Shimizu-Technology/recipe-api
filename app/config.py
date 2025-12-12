@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Can be either a file path or the raw cookie content
     instagram_cookies: str | None = None
     
+    # Sentry error monitoring
+    sentry_dsn: str | None = None
+    
     # Environment
     environment: str = "development"
     
