@@ -37,6 +37,10 @@ class Recipe(Base):
     # User ownership (Clerk user ID) - nullable for legacy recipes
     user_id = Column(String(64), nullable=True, index=True)
     
+    # Display name of the user who extracted this recipe
+    # Shown on Discover cards as "by Alanna" or "by lmshimizu"
+    extractor_display_name = Column(String(100), nullable=True)
+    
     # Public visibility - True means visible in Discover feed
     # Legacy recipes (user_id=NULL) are public by default
     is_public = Column(Boolean, nullable=False, default=False, server_default="false")

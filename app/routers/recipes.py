@@ -437,6 +437,7 @@ async def create_manual_recipe(
         extraction_quality=None,
         has_audio_transcript=False,
         user_id=user.id,
+        extractor_display_name=user.display_name,  # Store display name for attribution
         is_public=recipe_input.is_public,
     )
     
@@ -503,6 +504,7 @@ async def save_ocr_recipe(
         extraction_quality="good",  # OCR extractions are typically good quality
         has_audio_transcript=False,
         user_id=user.id,
+        extractor_display_name=user.display_name,  # Store display name for attribution
         is_public=ocr_data.is_public,
     )
     

@@ -260,7 +260,7 @@ async def extract_recipe(
             detail=f"Extraction failed: {extraction_result.error}"
         )
     
-    # Save to database with user_id
+    # Save to database with user_id and display name
     new_recipe = Recipe(
         source_url=url,
         source_type=platform,
@@ -271,6 +271,7 @@ async def extract_recipe(
         extraction_quality=extraction_result.extraction_quality,
         has_audio_transcript=extraction_result.has_audio_transcript,
         user_id=user.id,  # Assign to current user
+        extractor_display_name=user.display_name,  # Store display name for attribution
         is_public=request.is_public,  # Public by default, user can opt out
     )
     
@@ -379,7 +380,7 @@ async def start_extraction_job(
     db.add(job)
     await db.commit()
     
-    # Start background task WITH USER ID
+    # Start background task WITH USER ID and display name
     background_tasks.add_task(
         run_extraction_job,
         job_id=job_id,
@@ -387,6 +388,7 @@ async def start_extraction_job(
         location=request.location,
         notes=request.notes,
         user_id=user.id,  # Pass user ID to background task
+        user_display_name=user.display_name,  # Pass display name for attribution
         is_public=request.is_public  # Pass public setting
     )
     
@@ -403,6 +405,7 @@ async def run_extraction_job(
     location: str,
     notes: str,
     user_id: str,  # User ID for the recipe
+    user_display_name: str = "A chef",  # Display name for attribution
     is_public: bool = True  # Public by default
 ):
     """Background task to run extraction."""
@@ -443,7 +446,7 @@ async def run_extraction_job(
                 return
             
             if result.success:
-                # Save recipe WITH USER ID
+                # Save recipe WITH USER ID and display name
                 new_recipe = Recipe(
                     source_url=url,
                     source_type=platform,
@@ -454,6 +457,7 @@ async def run_extraction_job(
                     extraction_quality=result.extraction_quality,
                     has_audio_transcript=result.has_audio_transcript,
                     user_id=user_id,  # Assign to user
+                    extractor_display_name=user_display_name,  # Store display name
                     is_public=is_public,  # Public by default, user can opt out
                 )
                 db.add(new_recipe)

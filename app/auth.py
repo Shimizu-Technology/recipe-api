@@ -35,6 +35,27 @@ class ClerkUser(BaseModel):
         """Check if user has admin role."""
         return self.role == "admin"
 
+    @property
+    def display_name(self) -> str:
+        """
+        Get a user-friendly display name.
+        
+        Priority:
+        1. first_name + last_name (if both present)
+        2. first_name only (if no last name)
+        3. email prefix before @ (if no name)
+        4. "A chef" (fallback)
+        """
+        if self.first_name and self.last_name:
+            return f"{self.first_name} {self.last_name}"
+        elif self.first_name:
+            return self.first_name
+        elif self.email:
+            # Use part before @ as display name
+            return self.email.split("@")[0]
+        else:
+            return "A chef"
+
 
 # Cache the JWKS client to avoid repeated fetches
 _jwks_client: Optional[PyJWKClient] = None
