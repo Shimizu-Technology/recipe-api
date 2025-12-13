@@ -52,8 +52,8 @@ def _generate_reextract_change_summary(old_extracted: dict, new_extracted: dict)
         changes.extend(step_changes)
     
     # Compare times
-    old_times = old_extracted.get("times", {})
-    new_times = new_extracted.get("times", {})
+    old_times = old_extracted.get("times") or {}
+    new_times = new_extracted.get("times") or {}
     if old_times != new_times:
         time_changes = []
         for key, label in [("prep", "prep"), ("cook", "cook"), ("total", "total")]:

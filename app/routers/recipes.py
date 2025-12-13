@@ -44,8 +44,8 @@ def generate_change_summary(old_extracted: dict, new_extracted: dict) -> str:
         changes.append(f"Servings: {old_servings or 'none'} → {new_servings or 'none'}")
     
     # Compare times
-    old_times = old_extracted.get("times", {})
-    new_times = new_extracted.get("times", {})
+    old_times = old_extracted.get("times") or {}
+    new_times = new_extracted.get("times") or {}
     if old_times != new_times:
         time_changes = []
         for key, label in [("prep", "prep"), ("cook", "cook"), ("total", "total")]:
@@ -323,7 +323,7 @@ class ManualRecipeCreate(BaseModel):
 def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
     """Convert Recipe model to RecipeListItem schema."""
     extracted = recipe.extracted or {}
-    times = extracted.get("times", {})
+    times = extracted.get("times") or {}
     
     return RecipeListItem(
         id=recipe.id,
@@ -722,7 +722,7 @@ async def search_recipes(
     if time_filter and time_filter != 'all':
         filtered_recipes = []
         for recipe in recipes:
-            total_time = recipe.extracted.get("times", {}).get("total") or recipe.extracted.get("total_time")
+            total_time = (recipe.extracted.get("times") or {}).get("total") or recipe.extracted.get("total_time")
             minutes = parse_time_to_minutes(total_time) if total_time else None
             
             if minutes is None:
@@ -810,7 +810,7 @@ async def search_public_recipes(
     if time_filter and time_filter != 'all':
         filtered_recipes = []
         for recipe in recipes:
-            total_time = recipe.extracted.get("times", {}).get("total") or recipe.extracted.get("total_time")
+            total_time = (recipe.extracted.get("times") or {}).get("total") or recipe.extracted.get("total_time")
             minutes = parse_time_to_minutes(total_time) if total_time else None
             
             if minutes is None:

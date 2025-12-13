@@ -84,7 +84,7 @@ def build_recipe_context(recipe: Recipe) -> str:
     # Basic info
     title = extracted.get("title", "Untitled Recipe")
     servings = extracted.get("servings", "Unknown")
-    times = extracted.get("times", {})
+    times = extracted.get("times") or {}
     total_time = times.get("total", "Unknown")
     prep_time = times.get("prep", "Unknown")
     cook_time = times.get("cook", "Unknown")

@@ -307,7 +307,7 @@ async def get_collection_recipes(
             source_type=recipe.source_type,
             thumbnail_url=recipe.thumbnail_url,
             tags=recipe.extracted.get("tags", []),
-            total_time=recipe.extracted.get("times", {}).get("total"),
+            total_time=(recipe.extracted.get("times") or {}).get("total"),
             servings=recipe.extracted.get("servings"),
             added_at=added_at
         )
