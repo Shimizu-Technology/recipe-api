@@ -75,7 +75,7 @@ class RecipeExtracted(BaseModel):
     title: str
     sourceUrl: str
     servings: Optional[int] = None
-    times: Times
+    times: Optional[Times] = None
     # New component-based structure
     components: list[RecipeComponent] = []
     # Legacy fields (kept for backward compatibility)
@@ -84,7 +84,7 @@ class RecipeExtracted(BaseModel):
     equipment: Optional[list[str]] = None
     notes: Optional[str] = None
     tags: list[str] = []
-    media: Media
+    media: Optional[Media] = None
     totalEstimatedCost: Optional[float] = None
     costLocation: str = "US Average"
     nutrition: Nutrition
