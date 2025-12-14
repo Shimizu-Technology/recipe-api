@@ -305,3 +305,26 @@ async def clear_all_items(
         "count": len(deleted_ids)
     }
 
+
+@router.delete("/clear/recipe/{recipe_id}")
+async def clear_recipe_items(
+    recipe_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user)
+):
+    """Delete all items from a specific recipe in the grocery list."""
+    result = await db.execute(
+        delete(GroceryItem).where(
+            GroceryItem.user_id == user.id,
+            GroceryItem.recipe_id == recipe_id
+        ).returning(GroceryItem.id)
+    )
+    deleted_ids = result.scalars().all()
+    await db.commit()
+    
+    return {
+        "message": f"Cleared {len(deleted_ids)} items from recipe",
+        "count": len(deleted_ids),
+        "recipe_id": str(recipe_id)
+    }
+
