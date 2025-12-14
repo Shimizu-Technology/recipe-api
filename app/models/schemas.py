@@ -123,6 +123,7 @@ class RecipeListItem(BaseModel):
     extraction_quality: Optional[str] = None
     has_audio_transcript: bool = False
     tags: list[str] = []
+    meal_types: list[str] = []
     servings: Optional[int] = None
     total_time: Optional[str] = None
     created_at: datetime

@@ -64,10 +64,19 @@ EXTRACTION RULES:
   * Use standard USDA nutritional data as reference
   * ALWAYS calculate BOTH perServing and total nutrition values
   * Round calories to nearest 5, macros to nearest 0.5g, sodium to nearest 10mg
+- REQUIRED: For mealTypes, specify which meals this recipe is suitable for:
+  * Must be an array containing one or more of: "breakfast", "lunch", "dinner", "snack", "dessert"
+  * A recipe can have multiple meal types (e.g., ["lunch", "dinner"])
+  * Base this on: typical eating times, portion size, recipe type
+  * Examples:
+    - Pancakes → ["breakfast"]
+    - Chicken salad → ["lunch", "dinner"]
+    - Cookies → ["snack", "dessert"]
+    - Steak dinner → ["dinner"]
+    - Smoothie bowl → ["breakfast", "snack"]
 - For tags, provide comprehensive categorization (5-10 tags total):
   * Main ingredient(s): "chicken", "beef", "pasta", "rice", "eggs"
   * Cuisine type: "italian", "mexican", "asian", "american"
-  * Meal type: "breakfast", "lunch", "dinner", "snack", "dessert"
   * Cooking method: "baked", "fried", "grilled", "slow-cooked", "one-pot"
   * Difficulty: "easy", "intermediate", "advanced"
   * Dietary: "vegetarian", "vegan", "gluten-free", "keto", "low-carb"
@@ -93,7 +102,8 @@ Return a JSON object with this structure:
   ],
   "equipment": ["pan", "bowl"],
   "notes": null,
-  "tags": ["easy", "quick", "dinner"],
+  "mealTypes": ["lunch", "dinner"],
+  "tags": ["easy", "quick", "chicken"],
   "totalEstimatedCost": 15.00,
   "costLocation": "{location}",
   "nutrition": {{
@@ -146,6 +156,10 @@ RECIPE_SCHEMA = {
         },
         "equipment": {"type": ["array", "null"], "items": {"type": "string"}},
         "notes": {"type": ["string", "null"]},
+        "mealTypes": {
+            "type": "array", 
+            "items": {"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack", "dessert"]}
+        },
         "tags": {"type": "array", "items": {"type": "string"}},
         "totalEstimatedCost": {"type": ["number", "null"]},
         "costLocation": {"type": "string"},
@@ -216,6 +230,9 @@ EXTRACTION RULES:
   * total: Total time
 - For servings, estimate a reasonable number based on ingredient quantities
 - For nutrition, calculate realistic nutritional values based on ingredients
+- For mealTypes, specify which meals this recipe is suitable for:
+  * Array of: "breakfast", "lunch", "dinner", "snack", "dessert"
+  * A recipe can have multiple meal types (e.g., ["lunch", "dinner"])
 - For tags, provide comprehensive categorization (5-10 tags)
 - COMPONENT ORGANIZATION:
   * If recipe has multiple distinct parts (e.g., "cake and frosting"), create separate components
@@ -239,7 +256,8 @@ Return a JSON object with this structure:
   ],
   "equipment": ["pan", "bowl"],
   "notes": "Any personal notes or tips from the original recipe",
-  "tags": ["easy", "quick", "dinner"],
+  "mealTypes": ["lunch", "dinner"],
+  "tags": ["easy", "quick", "chicken"],
   "totalEstimatedCost": 15.00,
   "costLocation": "{location}",
   "nutrition": {{
@@ -304,7 +322,8 @@ Return a JSON object with this structure:
   ],
   "equipment": ["pan", "bowl"],
   "notes": "Any personal notes or tips",
-  "tags": ["easy", "quick", "dinner"],
+  "mealTypes": ["lunch", "dinner"],
+  "tags": ["easy", "quick", "chicken"],
   "totalEstimatedCost": 15.00,
   "costLocation": "{location}",
   "nutrition": {{

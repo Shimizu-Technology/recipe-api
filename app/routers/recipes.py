@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, String
+from sqlalchemy import select, func, or_, String, desc
 from pydantic import BaseModel, ConfigDict
 from uuid import UUID
 from typing import Optional, List, Generic, TypeVar
@@ -334,6 +334,7 @@ def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
         extraction_quality=recipe.extraction_quality,
         has_audio_transcript=recipe.has_audio_transcript or False,
         tags=extracted.get("tags", []),
+        meal_types=extracted.get("mealTypes", []),
         servings=extracted.get("servings"),
         total_time=times.get("total"),
         created_at=recipe.created_at,
@@ -563,6 +564,7 @@ async def get_public_recipes(
     limit: int = Query(default=20, le=100, description="Max recipes to return"),
     offset: int = Query(default=0, ge=0, description="Number of recipes to skip"),
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
+    sort: str = Query(default="recent", description="Sort order: recent, random, or popular"),
     db: AsyncSession = Depends(get_db),
     user: Optional[ClerkUser] = Depends(get_optional_user),
 ):
@@ -570,6 +572,11 @@ async def get_public_recipes(
     Get all public recipes (the shared library) with pagination.
     
     Works with or without authentication.
+    
+    Sort options:
+    - recent: Newest first (default)
+    - random: Randomized order (changes on each request)
+    - popular: Most saved recipes first
     """
     base_query = select(Recipe).where(Recipe.is_public == True)
     
@@ -581,9 +588,31 @@ async def get_public_recipes(
     count_result = await db.execute(select(func.count()).select_from(base_query.subquery()))
     total_count = count_result.scalar() or 0
     
+    # Apply sort order
+    if sort == "random":
+        # Use database random function for true randomization
+        # Note: For PostgreSQL, use func.random()
+        ordered_query = base_query.order_by(func.random())
+    elif sort == "popular":
+        # Order by save count (most saved first), then by recency
+        # Use a scalar subquery to count saves for each recipe
+        save_count_subquery = (
+            select(func.count(SavedRecipe.id))
+            .where(SavedRecipe.recipe_id == Recipe.id)
+            .correlate(Recipe)
+            .scalar_subquery()
+        )
+        ordered_query = base_query.order_by(
+            desc(save_count_subquery),
+            Recipe.created_at.desc()
+        )
+    else:
+        # Default: recent (newest first)
+        ordered_query = base_query.order_by(Recipe.created_at.desc())
+    
     # Execute paginated query
     result = await db.execute(
-        base_query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
+        ordered_query.offset(offset).limit(limit)
     )
     recipes = result.scalars().all()
     
