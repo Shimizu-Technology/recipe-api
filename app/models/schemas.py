@@ -140,6 +140,23 @@ class RecipeSearchResult(BaseModel):
     match_type: str = "title"  # title|ingredient|tag
 
 
+class IngredientMatchResult(BaseModel):
+    """Recipe with ingredient match information."""
+    recipe: RecipeListItem
+    matched_ingredients: list[str] = []  # Ingredients from recipe that matched
+    total_ingredients: int = 0  # Total ingredients in the recipe
+    match_count: int = 0  # Number of matched ingredients
+    match_percentage: float = 0.0  # Percentage of recipe ingredients matched
+    missing_ingredients: list[str] = []  # Ingredients needed but not provided
+
+
+class IngredientSearchResponse(BaseModel):
+    """Response for ingredient-based recipe search."""
+    results: list[IngredientMatchResult]
+    query_ingredients: list[str]  # The ingredients the user searched for
+    total: int  # Total number of matching recipes
+
+
 # ============================================================
 # Extraction Job Schemas
 # ============================================================

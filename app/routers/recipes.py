@@ -10,7 +10,7 @@ import json
 
 from app.db import get_db
 from app.models.recipe import Recipe, SavedRecipe, RecipeNote, RecipeVersion
-from app.models.schemas import RecipeResponse, RecipeListItem
+from app.models.schemas import RecipeResponse, RecipeListItem, IngredientMatchResult, IngredientSearchResponse
 
 
 def generate_change_summary(old_extracted: dict, new_extracted: dict) -> str:
@@ -775,6 +775,148 @@ async def search_recipes(
         limit=limit,
         offset=offset,
         has_more=has_more,
+    )
+
+
+def extract_ingredient_names(recipe: Recipe) -> list[str]:
+    """Extract all ingredient names from a recipe's components."""
+    extracted = recipe.extracted or {}
+    components = extracted.get("components") or []
+    
+    ingredient_names = []
+    for component in components:
+        ingredients = component.get("ingredients") or []
+        for ing in ingredients:
+            name = ing.get("name")
+            if name:
+                ingredient_names.append(name.lower().strip())
+    
+    # Also check legacy ingredients field
+    legacy_ingredients = extracted.get("ingredients") or []
+    for ing in legacy_ingredients:
+        name = ing.get("name") if isinstance(ing, dict) else ing
+        if name:
+            ingredient_names.append(str(name).lower().strip())
+    
+    return ingredient_names
+
+
+def match_ingredients(recipe_ingredients: list[str], query_ingredients: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Match query ingredients against recipe ingredients.
+    Returns (matched_ingredients, missing_ingredients).
+    Uses fuzzy matching - query "chicken" matches "chicken breast", "chicken thighs", etc.
+    """
+    matched = []
+    
+    for query_ing in query_ingredients:
+        query_lower = query_ing.lower().strip()
+        for recipe_ing in recipe_ingredients:
+            # Check if query ingredient is contained in recipe ingredient or vice versa
+            if query_lower in recipe_ing or recipe_ing in query_lower:
+                matched.append(recipe_ing)
+                break
+    
+    # Get unique matches
+    matched = list(set(matched))
+    
+    # Find missing ingredients (recipe ingredients not matched by any query)
+    matched_set = set(matched)
+    missing = [ing for ing in recipe_ingredients if ing not in matched_set]
+    
+    return matched, missing
+
+
+@router.get("/search/by-ingredients", response_model=IngredientSearchResponse)
+async def search_by_ingredients(
+    ingredients: str = Query(..., description="Comma-separated list of ingredients to search for"),
+    include_saved: bool = Query(default=True, description="Include saved recipes from other users"),
+    include_public: bool = Query(default=True, description="Include all public recipes from Discover"),
+    limit: int = Query(default=20, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Search recipes by ingredients you have on hand.
+    
+    Returns recipes sorted by how many of the provided ingredients they use.
+    Great for "what can I make with these leftovers?" scenarios.
+    
+    Searches:
+    - Your own recipes (always)
+    - Saved recipes (if include_saved=True)
+    - All public recipes (if include_public=True)
+    """
+    # Parse ingredients
+    query_ingredients = [ing.strip().lower() for ing in ingredients.split(",") if ing.strip()]
+    
+    if not query_ingredients:
+        return IngredientSearchResponse(
+            results=[],
+            query_ingredients=[],
+            total=0
+        )
+    
+    # Get user's own recipes
+    own_recipes_result = await db.execute(
+        select(Recipe).where(Recipe.user_id == user.id)
+    )
+    own_recipes = list(own_recipes_result.scalars().all())
+    
+    # Optionally get saved recipes
+    saved_recipes = []
+    if include_saved:
+        saved_result = await db.execute(
+            select(Recipe)
+            .join(SavedRecipe, SavedRecipe.recipe_id == Recipe.id)
+            .where(SavedRecipe.user_id == user.id)
+        )
+        saved_recipes = list(saved_result.scalars().all())
+    
+    # Optionally get all public recipes
+    public_recipes = []
+    if include_public:
+        public_result = await db.execute(
+            select(Recipe).where(Recipe.is_public == True)
+        )
+        public_recipes = list(public_result.scalars().all())
+    
+    # Combine and dedupe (own recipes take priority)
+    all_recipes = list({r.id: r for r in own_recipes + saved_recipes + public_recipes}.values())
+    
+    # Score each recipe
+    results = []
+    for recipe in all_recipes:
+        recipe_ingredients = extract_ingredient_names(recipe)
+        if not recipe_ingredients:
+            continue
+        
+        matched, missing = match_ingredients(recipe_ingredients, query_ingredients)
+        
+        if matched:  # Only include recipes with at least one match
+            match_count = len(matched)
+            total_ingredients = len(recipe_ingredients)
+            match_percentage = (match_count / total_ingredients) * 100 if total_ingredients > 0 else 0
+            
+            results.append(IngredientMatchResult(
+                recipe=recipe_to_list_item(recipe),
+                matched_ingredients=matched,
+                total_ingredients=total_ingredients,
+                match_count=match_count,
+                match_percentage=round(match_percentage, 1),
+                missing_ingredients=missing[:10]  # Limit to 10 missing ingredients
+            ))
+    
+    # Sort by match percentage (highest first), then by match count
+    results.sort(key=lambda x: (x.match_percentage, x.match_count), reverse=True)
+    
+    # Apply limit
+    results = results[:limit]
+    
+    return IngredientSearchResponse(
+        results=results,
+        query_ingredients=query_ingredients,
+        total=len(results)
     )
 
 
