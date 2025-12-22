@@ -340,6 +340,7 @@ def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
         created_at=recipe.created_at,
         is_public=recipe.is_public,
         user_id=recipe.user_id,
+        extractor_display_name=recipe.extractor_display_name,
     )
 
 

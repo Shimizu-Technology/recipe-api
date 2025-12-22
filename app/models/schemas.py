@@ -129,6 +129,7 @@ class RecipeListItem(BaseModel):
     created_at: datetime
     user_id: Optional[str] = None
     is_public: bool = False
+    extractor_display_name: Optional[str] = None  # For attribution on Discover
     
     class Config:
         from_attributes = True
