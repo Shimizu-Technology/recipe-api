@@ -276,6 +276,95 @@ class LLMService:
             error="All multi-image extraction attempts failed"
         )
     
+    async def generate_json(self, prompt: str) -> Optional[dict]:
+        """
+        Generate JSON from a prompt using Gemini (primary) or GPT (fallback).
+        
+        Simpler interface for when you just need JSON output without
+        the full recipe extraction pipeline.
+        
+        Returns the parsed JSON dict, or None if extraction failed.
+        """
+        import time
+        
+        # Try Gemini first
+        if self.openrouter_api_key:
+            try:
+                result = await self._call_simple_llm(
+                    config=self.GEMINI_CONFIG,
+                    api_key=self.openrouter_api_key,
+                    prompt=prompt,
+                    is_openrouter=True
+                )
+                if result:
+                    return result
+            except Exception as e:
+                print(f"⚠️ Gemini failed: {e}")
+        
+        # Fallback to GPT
+        if self.openai_api_key:
+            try:
+                result = await self._call_simple_llm(
+                    config=self.GPT_CONFIG,
+                    api_key=self.openai_api_key,
+                    prompt=prompt,
+                    is_openrouter=False
+                )
+                if result:
+                    return result
+            except Exception as e:
+                print(f"⚠️ GPT also failed: {e}")
+        
+        return None
+    
+    async def _call_simple_llm(
+        self,
+        config: dict,
+        api_key: str,
+        prompt: str,
+        is_openrouter: bool
+    ) -> Optional[dict]:
+        """Make a simple LLM API call and return parsed JSON."""
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        if is_openrouter:
+            headers["HTTP-Referer"] = "https://recipe-extractor.app"
+            headers["X-Title"] = "Recipe Extractor"
+        
+        payload = {
+            "model": config["model"],
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 4000,
+        }
+        
+        if not is_openrouter:
+            payload["response_format"] = {"type": "json_object"}
+        
+        url = f"{config['base_url']}/chat/completions"
+        
+        async with httpx.AsyncClient(timeout=config["timeout"]) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            
+            if response.status_code != 200:
+                print(f"❌ LLM error: HTTP {response.status_code}")
+                return None
+            
+            data = response.json()
+            raw_content = data["choices"][0]["message"]["content"]
+            
+            if not raw_content:
+                return None
+            
+            return self._parse_json_response(raw_content)
+    
     async def _try_multi_image_extraction(
         self,
         config: dict,

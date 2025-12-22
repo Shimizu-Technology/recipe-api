@@ -30,6 +30,11 @@ dependencies = [
     "cryptography>=46.0.3",
     # Error Monitoring
     "sentry-sdk[fastapi]>=2.0.0",
+    # Website Scraping
+    "beautifulsoup4>=4.12.0",
+    "extruct>=0.17.0",
+    "trafilatura>=1.12.0",
+    "lxml>=5.0.0",
 ]
 
 [project.optional-dependencies]

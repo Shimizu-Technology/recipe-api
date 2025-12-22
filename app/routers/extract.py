@@ -241,13 +241,62 @@ async def extract_recipe(
     
     # Detect platform
     platform = video_service.detect_platform(url)
+    
     if platform == "web":
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported URL. Please provide a TikTok, YouTube, or Instagram video URL."
+        # Website extraction (recipe blogs, etc.)
+        from app.services.website import website_service
+        
+        extraction_result = await website_service.extract(
+            url=url,
+            location=request.location,
+            notes=request.notes
+        )
+        
+        if not extraction_result.success:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Website extraction failed: {extraction_result.error}"
+            )
+        
+        # Save to database
+        new_recipe = Recipe(
+            source_url=url,
+            source_type="website",
+            raw_text=extraction_result.raw_text,
+            extracted=extraction_result.recipe,
+            thumbnail_url=extraction_result.thumbnail_url,
+            extraction_method=extraction_result.extraction_method,
+            extraction_quality=extraction_result.extraction_quality,
+            has_audio_transcript=False,
+            user_id=user.id,
+            extractor_display_name=user.display_name,
+            is_public=request.is_public,
+        )
+        
+        db.add(new_recipe)
+        await db.commit()
+        await db.refresh(new_recipe)
+        
+        # Upload thumbnail to S3 for permanent storage
+        if extraction_result.thumbnail_url:
+            s3_url = await storage_service.upload_thumbnail_from_url(
+                extraction_result.thumbnail_url,
+                str(new_recipe.id)
+            )
+            if s3_url:
+                new_recipe.thumbnail_url = s3_url
+                if new_recipe.extracted and "media" in new_recipe.extracted:
+                    new_recipe.extracted["media"]["thumbnail"] = s3_url
+                await db.commit()
+                await db.refresh(new_recipe)
+        
+        return ExtractResponse(
+            id=new_recipe.id,
+            recipe=new_recipe.extracted,
+            is_existing=False
         )
     
-    # Run extraction
+    # Video extraction (TikTok, YouTube, Instagram)
     extraction_result = await recipe_extractor.extract(
         url=url,
         location=request.location,
@@ -426,14 +475,33 @@ async def run_extraction_job(
                     job.updated_at = datetime.utcnow()
                     await db.commit()
             
-            # Run extraction
+            # Detect platform and run appropriate extraction
             platform = video_service.detect_platform(url)
-            result = await recipe_extractor.extract(
-                url=url,
-                location=location,
-                notes=notes,
-                progress_callback=update_progress
-            )
+            
+            if platform == "web":
+                # Website extraction
+                from app.services.website import website_service
+                
+                await update_progress(ExtractionProgress(
+                    step="fetching",
+                    progress=20,
+                    message="Fetching webpage..."
+                ))
+                
+                result = await website_service.extract(
+                    url=url,
+                    location=location,
+                    notes=notes
+                )
+                platform = "website"  # Use "website" as source_type
+            else:
+                # Video extraction (TikTok, YouTube, Instagram)
+                result = await recipe_extractor.extract(
+                    url=url,
+                    location=location,
+                    notes=notes,
+                    progress_callback=update_progress
+                )
             
             # Get job record
             job_result = await db.execute(
