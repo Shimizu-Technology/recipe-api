@@ -513,7 +513,26 @@ async def run_extraction_job(
                 print(f"❌ Job {job_id} not found")
                 return
             
+            # Check if job was cancelled before saving (early check)
+            if job.status == "cancelled":
+                print(f"🚫 Job {job_id} was cancelled - not saving recipe")
+                return
+            
             if result.success:
+                # CRITICAL: Re-check cancellation status with FRESH data before saving
+                # This prevents race condition where cancel comes in during extraction
+                # Use a new query with execution_options to get fresh data from DB
+                fresh_job_result = await db.execute(
+                    select(ExtractionJob)
+                    .where(ExtractionJob.id == job_id)
+                    .execution_options(populate_existing=True)
+                )
+                job = fresh_job_result.scalar_one_or_none()
+                
+                if not job or job.status == "cancelled":
+                    print(f"🚫 Job {job_id} was cancelled during extraction - not saving recipe")
+                    return
+                
                 # Save recipe WITH USER ID and display name
                 new_recipe = Recipe(
                     source_url=url,
@@ -531,6 +550,19 @@ async def run_extraction_job(
                 db.add(new_recipe)
                 await db.commit()
                 await db.refresh(new_recipe)
+                
+                # Check AGAIN after commit - if cancelled during save, delete the recipe
+                post_save_job_result = await db.execute(
+                    select(ExtractionJob)
+                    .where(ExtractionJob.id == job_id)
+                    .execution_options(populate_existing=True)
+                )
+                job = post_save_job_result.scalar_one_or_none()
+                if job and job.status == "cancelled":
+                    print(f"🚫 Job {job_id} was cancelled during save - deleting recipe {new_recipe.id}")
+                    await db.delete(new_recipe)
+                    await db.commit()
+                    return
                 
                 # Upload thumbnail to S3 for permanent storage
                 if result.thumbnail_url:
@@ -613,6 +645,45 @@ async def get_job_status(
         recipe_id=job.recipe_id,
         error_message=job.error_message
     )
+
+
+@router.delete("/jobs/{job_id}")
+async def cancel_job(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: ClerkUser = Depends(get_current_user),
+):
+    """
+    Cancel an extraction job.
+    
+    This marks the job as 'cancelled'. The background task will check this status
+    and avoid saving the recipe if cancelled.
+    """
+    result = await db.execute(
+        select(ExtractionJob).where(ExtractionJob.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Only allow cancellation of processing jobs
+    if job.status not in ["processing", "pending"]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot cancel job with status '{job.status}'"
+        )
+    
+    # Mark as cancelled
+    job.status = "cancelled"
+    job.current_step = "cancelled"
+    job.message = "Extraction cancelled by user"
+    job.updated_at = datetime.utcnow()
+    await db.commit()
+    
+    print(f"🚫 Job {job_id} cancelled by user")
+    
+    return {"message": "Job cancelled successfully", "job_id": str(job_id)}
 
 
 @router.get("/locations")

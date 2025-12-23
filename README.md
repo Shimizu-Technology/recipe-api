@@ -1,6 +1,6 @@
 # Recipe Extractor API
 
-FastAPI backend for extracting structured recipes from cooking videos using AI.
+FastAPI backend for extracting structured recipes from cooking videos and recipe websites using AI.
 
 ## Quick Start
 
@@ -90,16 +90,27 @@ Instagram requires authentication to extract videos. To enable:
 
 ## How It Works
 
+### Video Extraction
 ```
-User pastes URL → yt-dlp downloads audio → Whisper transcribes
+User pastes video URL → yt-dlp downloads audio → Whisper transcribes
     → Gemini extracts recipe → Thumbnail uploaded to S3 → Saved to PostgreSQL
 ```
+
+### Website Extraction
+```
+User pastes website URL → Fetch HTML → Parse JSON-LD (or AI fallback)
+    → Detect ingredient sections (WPRM/Tasty Recipes/Hearst Media)
+    → Split combined steps → Thumbnail uploaded to S3 → Saved to PostgreSQL
+```
+
+Supported sites: AllRecipes, Budget Bytes, Half Baked Harvest, Delish, Pinch of Yum, Sally's Baking, and hundreds more.
 
 **AI Stack:**
 | Task | Model |
 |------|-------|
 | Transcription | OpenAI Whisper |
 | Recipe Extraction (Video) | Gemini 2.0 Flash (primary), GPT-4o-mini (fallback) |
+| Recipe Extraction (Website) | JSON-LD parsing (primary), GPT-4o-mini (fallback) |
 | Recipe Extraction (OCR) | Gemini 2.0 Flash Vision (primary), GPT-4o Vision (fallback) |
 | Recipe Chat | GPT-4o |
 | Tag/Nutrition AI | GPT-4o-mini |
@@ -122,6 +133,7 @@ app/
 └── services/         # Business logic
     ├── extractor.py  # Main extraction orchestrator
     ├── video.py      # yt-dlp audio download
+    ├── website.py    # Website recipe extraction (JSON-LD, HTML parsing)
     ├── llm_client.py # Gemini/GPT extraction
     ├── openai_client.py  # Whisper + chat
     └── storage.py    # S3 uploads

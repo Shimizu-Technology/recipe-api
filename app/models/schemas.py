@@ -54,8 +54,18 @@ class NutritionValues(BaseModel):
 
 class Nutrition(BaseModel):
     """Complete nutrition information."""
-    perServing: NutritionValues
-    total: NutritionValues
+    perServing: NutritionValues = NutritionValues()
+    total: NutritionValues = NutritionValues()
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Nutrition":
+        """Safely create Nutrition from a dict, handling empty/malformed data."""
+        if not data or not isinstance(data, dict):
+            return cls()
+        return cls(
+            perServing=NutritionValues(**(data.get("perServing") or {})),
+            total=NutritionValues(**(data.get("total") or {}))
+        )
 
 
 class Media(BaseModel):
@@ -87,7 +97,7 @@ class RecipeExtracted(BaseModel):
     media: Optional[Media] = None
     totalEstimatedCost: Optional[float] = None
     costLocation: str = "US Average"
-    nutrition: Nutrition
+    nutrition: Nutrition = Nutrition()
 
 
 # ============================================================

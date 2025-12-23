@@ -2,15 +2,49 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, String, desc
+from sqlalchemy import select, func, or_, String, desc, delete
 from pydantic import BaseModel, ConfigDict
 from uuid import UUID
 from typing import Optional, List, Generic, TypeVar
 import json
 
 from app.db import get_db
-from app.models.recipe import Recipe, SavedRecipe, RecipeNote, RecipeVersion
+from app.models.recipe import Recipe, SavedRecipe, RecipeNote, RecipeVersion, ExtractionJob, CollectionRecipe
 from app.models.schemas import RecipeResponse, RecipeListItem, IngredientMatchResult, IngredientSearchResponse
+
+
+def normalize_recipe_data(recipe: Recipe) -> Recipe:
+    """
+    Normalize recipe data to ensure all required fields have valid values.
+    This prevents validation errors when returning recipes.
+    """
+    if not recipe.extracted:
+        return recipe
+    
+    extracted = dict(recipe.extracted)
+    modified = False
+    
+    # Ensure nutrition has proper structure
+    nutrition = extracted.get("nutrition")
+    if not nutrition or not isinstance(nutrition, dict):
+        extracted["nutrition"] = {"perServing": {}, "total": {}}
+        modified = True
+    elif not nutrition.get("perServing") or not nutrition.get("total"):
+        extracted["nutrition"] = {
+            "perServing": nutrition.get("perServing") or {},
+            "total": nutrition.get("total") or {}
+        }
+        modified = True
+    
+    # Ensure times has proper structure
+    if extracted.get("times") is None:
+        extracted["times"] = {}
+        modified = True
+    
+    if modified:
+        recipe.extracted = extracted
+    
+    return recipe
 
 
 def generate_change_summary(old_extracted: dict, new_extracted: dict) -> str:
@@ -566,6 +600,7 @@ async def get_public_recipes(
     offset: int = Query(default=0, ge=0, description="Number of recipes to skip"),
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     sort: str = Query(default="recent", description="Sort order: recent, random, or popular"),
+    extractor_id: Optional[str] = Query(default=None, description="Filter by extractor user ID"),
     db: AsyncSession = Depends(get_db),
     user: Optional[ClerkUser] = Depends(get_optional_user),
 ):
@@ -580,6 +615,10 @@ async def get_public_recipes(
     - popular: Most saved recipes first
     """
     base_query = select(Recipe).where(Recipe.is_public == True)
+    
+    # Filter by extractor user ID if provided
+    if extractor_id:
+        base_query = base_query.where(Recipe.user_id == extractor_id)
     
     # Apply source_type filter if provided
     if source_type and source_type != 'all':
@@ -929,16 +968,21 @@ async def search_public_recipes(
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram, manual"),
     time_filter: Optional[str] = Query(default=None, description="Filter by time: quick (<30min), medium (30-60min), long (60min+)"),
     tags: Optional[str] = Query(default=None, description="Comma-separated tags to filter by"),
+    extractor_id: Optional[str] = Query(default=None, description="Filter by extractor user ID"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Search and filter public recipes with pagination.
     - Search across title, ingredients, and tags
-    - Filter by source type, time, and tags
+    - Filter by source type, time, tags, and extractor
     - Returns paginated results with total count
     """
     # Start with base query
     base_query = select(Recipe).where(Recipe.is_public == True)
+    
+    # Filter by extractor user ID if provided
+    if extractor_id:
+        base_query = base_query.where(Recipe.user_id == extractor_id)
     
     # Full-text search across multiple fields
     if q and q.strip():
@@ -1046,6 +1090,48 @@ async def get_popular_tags(
     top_tags = tag_counter.most_common(limit)
     
     return [{"tag": tag, "count": count} for tag, count in top_tags]
+
+
+@router.get("/discover/contributors")
+async def get_top_contributors(
+    limit: int = Query(default=8, le=20, description="Max contributors to return"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get top contributors who have shared the most public recipes.
+    Returns user IDs, display names, and recipe counts.
+    """
+    # Query to get user_id, count of public recipes, and extract display info from first recipe
+    from sqlalchemy import literal_column
+    
+    # First get the top user IDs by recipe count
+    count_subquery = (
+        select(
+            Recipe.user_id,
+            func.count(Recipe.id).label('recipe_count'),
+            func.max(Recipe.extractor_display_name).label('display_name'),
+        )
+        .where(Recipe.is_public == True)
+        .where(Recipe.user_id.isnot(None))
+        .group_by(Recipe.user_id)
+        .order_by(func.count(Recipe.id).desc())
+        .limit(limit)
+    )
+    
+    result = await db.execute(count_subquery)
+    rows = result.all()
+    
+    contributors = []
+    for row in rows:
+        user_id, recipe_count, display_name = row
+        if user_id and recipe_count > 0:
+            contributors.append({
+                "user_id": user_id,
+                "display_name": display_name or "Anonymous Chef",
+                "recipe_count": recipe_count,
+            })
+    
+    return contributors
 
 
 @router.get("/recent", response_model=list[RecipeListItem])
@@ -1169,7 +1255,8 @@ async def get_recipe(
         if not user or recipe.user_id != user.id:
             raise HTTPException(status_code=403, detail="Access denied")
     
-    return recipe
+    # Normalize recipe data to ensure valid structure
+    return normalize_recipe_data(recipe)
 
 
 @router.put("/{recipe_id}", response_model=RecipeResponse)
@@ -1273,6 +1360,33 @@ async def delete_recipe(
     if recipe.user_id != user.id:
         raise HTTPException(status_code=403, detail="You can only delete your own recipes")
     
+    # Delete related records first to avoid foreign key constraint issues
+    # Delete recipe versions (has NOT NULL constraint on recipe_id)
+    await db.execute(
+        delete(RecipeVersion).where(RecipeVersion.recipe_id == recipe_id)
+    )
+    
+    # Delete extraction jobs linked to this recipe
+    await db.execute(
+        delete(ExtractionJob).where(ExtractionJob.recipe_id == recipe_id)
+    )
+    
+    # Delete from saved_recipes
+    await db.execute(
+        delete(SavedRecipe).where(SavedRecipe.recipe_id == recipe_id)
+    )
+    
+    # Delete from collection_recipes
+    await db.execute(
+        delete(CollectionRecipe).where(CollectionRecipe.recipe_id == recipe_id)
+    )
+    
+    # Delete recipe notes
+    await db.execute(
+        delete(RecipeNote).where(RecipeNote.recipe_id == recipe_id)
+    )
+    
+    # Now delete the recipe itself
     await db.delete(recipe)
     await db.commit()
     

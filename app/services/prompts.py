@@ -229,7 +229,11 @@ EXTRACTION RULES:
   * cook: Estimate cooking time
   * total: Total time
 - For servings, estimate a reasonable number based on ingredient quantities
-- For nutrition, calculate realistic nutritional values based on ingredients
+- CRITICAL - For nutrition, you MUST ALWAYS calculate realistic nutritional values based on ingredients:
+  * NEVER leave nutrition empty - estimate based on ingredients even if not in the image
+  * Use standard USDA nutritional data as reference
+  * ALWAYS calculate BOTH perServing AND total nutrition values
+  * Include: calories, protein, carbs, fat, fiber, sugar, sodium
 - For mealTypes, specify which meals this recipe is suitable for:
   * Array of: "breakfast", "lunch", "dinner", "snack", "dessert"
   * A recipe can have multiple meal types (e.g., ["lunch", "dinner"])
@@ -305,6 +309,11 @@ EXTRACTION RULES:
 - STEPS MUST BE IN CORRECT ORDER: Page 1 steps first, then Page 2 steps, etc.
 - CRITICAL: ingredient "name" field must NEVER be null
 - CRITICAL: Count ALL steps from ALL pages - verify the total count is correct
+- CRITICAL - For nutrition, you MUST ALWAYS calculate realistic nutritional values based on ingredients:
+  * NEVER leave nutrition empty - estimate based on ingredients even if not in the images
+  * Use standard USDA nutritional data as reference
+  * ALWAYS calculate BOTH perServing AND total nutrition values
+  * Include: calories, protein, carbs, fat, fiber, sugar, sodium
 
 Return a JSON object with this structure:
 {{
