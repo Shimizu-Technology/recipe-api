@@ -30,12 +30,14 @@ class ChatMessage(BaseModel):
     """A single chat message."""
     role: str  # 'user' or 'assistant'
     content: str
+    image_url: Optional[str] = None  # Optional image URL for vision
 
 
 class ChatRequest(BaseModel):
     """Request to chat about a recipe."""
     message: str
     history: list[ChatMessage] = []  # Previous messages for context
+    image_base64: Optional[str] = None  # Optional base64 image for vision
 
 
 class ChatResponse(BaseModel):
@@ -194,6 +196,7 @@ Your role:
 5. Suggest wine/drink pairings
 6. Explain cooking techniques mentioned in the recipe
 7. Offer dietary modifications (dairy-free, gluten-free, vegan, etc.)
+8. Analyze photos of the dish if the user shares them (e.g., "Does this look done?", "What went wrong?")
 
 Guidelines:
 - Be concise but helpful
@@ -255,16 +258,48 @@ async def chat_about_recipe(
     
     # Add conversation history
     for msg in request.history[-10:]:  # Limit to last 10 messages for context
-        messages.append({
-            "role": msg.role,
-            "content": msg.content
-        })
+        if msg.image_url:
+            # Message with image - use vision format
+            messages.append({
+                "role": msg.role,
+                "content": [
+                    {"type": "text", "text": msg.content},
+                    {"type": "image_url", "image_url": {"url": msg.image_url}}
+                ]
+            })
+        else:
+            messages.append({
+                "role": msg.role,
+                "content": msg.content
+            })
     
-    # Add the current user message
-    messages.append({
-        "role": "user",
-        "content": request.message
-    })
+    # Add the current user message (with optional image)
+    if request.image_base64:
+        # Determine MIME type from base64 prefix
+        mime_type = "image/jpeg"
+        if request.image_base64.startswith("/9j/"):
+            mime_type = "image/jpeg"
+        elif request.image_base64.startswith("iVBOR"):
+            mime_type = "image/png"
+        elif request.image_base64.startswith("R0lG"):
+            mime_type = "image/gif"
+        elif request.image_base64.startswith("UklG"):
+            mime_type = "image/webp"
+        
+        image_url = f"data:{mime_type};base64,{request.image_base64}"
+        
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": request.message or "What do you see in this image? How does it relate to the recipe?"},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
+        })
+    else:
+        messages.append({
+            "role": "user",
+            "content": request.message
+        })
     
     try:
         # Call GPT-4o for better conversational quality
