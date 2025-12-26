@@ -6,5 +6,6 @@ from .chat import router as chat_router
 from .users import router as users_router
 from .collections import router as collections_router
 from .meal_plans import router as meal_plans_router
+from .tts import router as tts_router
 
-__all__ = ["recipes_router", "health_router", "extract_router", "grocery_router", "chat_router", "users_router", "collections_router"]
+__all__ = ["recipes_router", "health_router", "extract_router", "grocery_router", "chat_router", "users_router", "collections_router", "tts_router"]

@@ -1094,7 +1094,7 @@ async def get_popular_tags(
 
 @router.get("/discover/contributors")
 async def get_top_contributors(
-    limit: int = Query(default=8, le=20, description="Max contributors to return"),
+    limit: int = Query(default=8, le=100, description="Max contributors to return"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1132,6 +1132,118 @@ async def get_top_contributors(
             })
     
     return contributors
+
+
+@router.get("/similar/{recipe_id}", response_model=list[RecipeListItem])
+async def get_similar_recipes(
+    recipe_id: UUID,
+    limit: int = Query(default=6, le=12, description="Max similar recipes to return"),
+    db: AsyncSession = Depends(get_db),
+    user: Optional[ClerkUser] = Depends(get_optional_user),
+):
+    """
+    Get recipes similar to the given recipe based on tags and ingredients.
+    
+    Algorithm:
+    1. Get the target recipe's tags
+    2. Find other public recipes that share the most tags
+    3. Exclude the original recipe
+    4. Optionally boost recipes from the same user
+    """
+    # Get the target recipe
+    result = await db.execute(
+        select(Recipe).where(Recipe.id == recipe_id)
+    )
+    target_recipe = result.scalar_one_or_none()
+    
+    if not target_recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    # Extract tags from target recipe
+    target_tags = []
+    if target_recipe.extracted:
+        target_tags = target_recipe.extracted.get("tags", [])
+    
+    if not target_tags:
+        # If no tags, return recipes from same user or random public recipes
+        query = (
+            select(Recipe)
+            .where(Recipe.is_public == True)
+            .where(Recipe.id != recipe_id)
+            .order_by(func.random())
+            .limit(limit)
+        )
+        result = await db.execute(query)
+        similar_recipes = result.scalars().all()
+    else:
+        # Find recipes with matching tags using JSONB containment
+        # Count how many tags each recipe shares with the target
+        all_public_recipes = await db.execute(
+            select(Recipe)
+            .where(Recipe.is_public == True)
+            .where(Recipe.id != recipe_id)
+        )
+        candidates = all_public_recipes.scalars().all()
+        
+        # Score each recipe by tag overlap
+        scored_recipes = []
+        target_tags_lower = [t.lower() for t in target_tags]
+        target_user_id = target_recipe.user_id
+        
+        for recipe in candidates:
+            if not recipe.extracted:
+                continue
+            recipe_tags = recipe.extracted.get("tags", [])
+            if not recipe_tags:
+                continue
+            
+            recipe_tags_lower = [t.lower() for t in recipe_tags]
+            
+            # Count matching tags
+            matching_tags = len(set(target_tags_lower) & set(recipe_tags_lower))
+            
+            if matching_tags > 0:
+                # Bonus for same user (their other recipes)
+                same_user_bonus = 0.5 if recipe.user_id == target_user_id else 0
+                score = matching_tags + same_user_bonus
+                scored_recipes.append((score, recipe))
+        
+        # Sort by score descending, take top N
+        scored_recipes.sort(key=lambda x: x[0], reverse=True)
+        similar_recipes = [r for _, r in scored_recipes[:limit]]
+    
+    # Convert to RecipeListItem format
+    user_id = user.id if user else None
+    
+    # Get saved recipe IDs for current user
+    saved_ids = set()
+    if user_id:
+        saved_result = await db.execute(
+            select(SavedRecipe.recipe_id).where(SavedRecipe.user_id == user_id)
+        )
+        saved_ids = {row[0] for row in saved_result.fetchall()}
+    
+    items = []
+    for recipe in similar_recipes:
+        recipe = normalize_recipe_data(recipe)
+        extracted = recipe.extracted or {}
+        items.append(RecipeListItem(
+            id=str(recipe.id),
+            title=extracted.get("title", "Untitled Recipe"),
+            source_url=recipe.source_url or "",
+            thumbnail_url=recipe.thumbnail_url,
+            source_type=recipe.source_type or "manual",
+            total_time=extracted.get("times", {}).get("total"),
+            servings=extracted.get("servings"),
+            tags=extracted.get("tags", []),
+            is_public=recipe.is_public,
+            user_id=recipe.user_id,
+            created_at=recipe.created_at,
+            extractor_display_name=recipe.extractor_display_name,
+            meal_types=extracted.get("mealTypes", []),
+        ))
+    
+    return items
 
 
 @router.get("/recent", response_model=list[RecipeListItem])
