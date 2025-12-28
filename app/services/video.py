@@ -15,6 +15,116 @@ from app.config import get_settings
 settings = get_settings()
 
 
+# ============================================================
+# Friendly Error Messages for Video Extraction
+# ============================================================
+
+# Maps yt-dlp error patterns to user-friendly messages
+VIDEO_ERROR_PATTERNS = {
+    # Video unavailable/deleted
+    "video unavailable": {
+        "code": "VIDEO_UNAVAILABLE",
+        "message": "This video is no longer available. It may have been deleted by the creator.",
+    },
+    "this video has been removed": {
+        "code": "VIDEO_REMOVED",
+        "message": "This video has been removed by the creator or the platform.",
+    },
+    "video is private": {
+        "code": "VIDEO_PRIVATE",
+        "message": "This video is private. Only the creator can view it.",
+    },
+    "private video": {
+        "code": "VIDEO_PRIVATE",
+        "message": "This video is private. Only the creator can view it.",
+    },
+    "sign in to confirm your age": {
+        "code": "AGE_RESTRICTED",
+        "message": "This video is age-restricted and cannot be extracted.",
+    },
+    "age-restricted": {
+        "code": "AGE_RESTRICTED",
+        "message": "This video is age-restricted and cannot be extracted.",
+    },
+    # Instagram-specific
+    "login required": {
+        "code": "INSTAGRAM_AUTH_REQUIRED",
+        "message": "Instagram requires authentication. Please try again later.",
+    },
+    "rate-limit": {
+        "code": "RATE_LIMITED",
+        "message": "Too many requests. Please wait a few minutes and try again.",
+    },
+    # TikTok-specific
+    "couldn't find this account": {
+        "code": "ACCOUNT_NOT_FOUND",
+        "message": "This TikTok account no longer exists or has been banned.",
+    },
+    "video is currently unavailable": {
+        "code": "VIDEO_UNAVAILABLE",
+        "message": "This video is currently unavailable. It may be under review or deleted.",
+    },
+    # YouTube-specific
+    "video has been removed by the uploader": {
+        "code": "VIDEO_REMOVED",
+        "message": "This video has been removed by the uploader.",
+    },
+    "video has been removed for violating": {
+        "code": "VIDEO_REMOVED",
+        "message": "This video has been removed for violating platform guidelines.",
+    },
+    "this video is not available": {
+        "code": "VIDEO_UNAVAILABLE",
+        "message": "This video is not available. It may be region-restricted or deleted.",
+    },
+    "join this channel to get access": {
+        "code": "MEMBERS_ONLY",
+        "message": "This video is only available to channel members.",
+    },
+    # Generic errors
+    "unable to extract": {
+        "code": "EXTRACTION_FAILED",
+        "message": "We couldn't extract this video. It may be in an unsupported format.",
+    },
+    "http error 404": {
+        "code": "NOT_FOUND",
+        "message": "This video doesn't exist or the link is broken.",
+    },
+    "http error 403": {
+        "code": "ACCESS_DENIED",
+        "message": "Access to this video is denied. It may be private or region-restricted.",
+    },
+}
+
+
+def get_friendly_video_error(raw_error: str, platform: str = "video") -> tuple[str, str]:
+    """
+    Parse a raw yt-dlp error and return a friendly error message.
+    
+    Args:
+        raw_error: The raw error message from yt-dlp
+        platform: The video platform (youtube, tiktok, instagram)
+        
+    Returns:
+        Tuple of (error_code, friendly_message)
+    """
+    error_lower = raw_error.lower()
+    
+    for pattern, error_info in VIDEO_ERROR_PATTERNS.items():
+        if pattern in error_lower:
+            return error_info["code"], error_info["message"]
+    
+    # Default fallback based on platform
+    if platform == "instagram":
+        return "INSTAGRAM_ERROR", f"We couldn't access this Instagram video. It may be private, deleted, or temporarily unavailable."
+    elif platform == "tiktok":
+        return "TIKTOK_ERROR", f"We couldn't access this TikTok video. It may be private, deleted, or temporarily unavailable."
+    elif platform == "youtube":
+        return "YOUTUBE_ERROR", f"We couldn't access this YouTube video. It may be private, deleted, or region-restricted."
+    else:
+        return "UNKNOWN_ERROR", f"We couldn't process this video. Please check the link and try again."
+
+
 @dataclass
 class VideoMetadata:
     """Metadata extracted from video platforms."""
@@ -32,6 +142,8 @@ class AudioExtractionResult:
     file_path: Optional[str] = None
     duration: Optional[float] = None
     error: Optional[str] = None
+    error_code: Optional[str] = None  # Machine-readable error code
+    friendly_error: Optional[str] = None  # User-friendly error message
 
 
 class VideoService:
@@ -251,16 +363,15 @@ class VideoService:
                 error_msg = stderr.decode() if stderr else "Unknown error"
                 print(f"❌ yt-dlp failed: {error_msg}")
                 
-                # Check for Instagram-specific errors
-                if platform == "instagram" and ("login required" in error_msg.lower() or "rate-limit" in error_msg.lower()):
-                    return AudioExtractionResult(
-                        success=False,
-                        error="INSTAGRAM_AUTH_REQUIRED"
-                    )
+                # Get friendly error message
+                error_code, friendly_error = get_friendly_video_error(error_msg, platform)
+                print(f"📝 Error code: {error_code}, Message: {friendly_error}")
                 
                 return AudioExtractionResult(
                     success=False,
-                    error=f"yt-dlp failed: {error_msg}"
+                    error=error_msg,  # Keep raw error for logging
+                    error_code=error_code,
+                    friendly_error=friendly_error
                 )
             
             # Find the downloaded audio file
@@ -268,7 +379,9 @@ class VideoService:
             if not audio_files:
                 return AudioExtractionResult(
                     success=False,
-                    error="No audio file found after download"
+                    error="No audio file found after download",
+                    error_code="NO_AUDIO",
+                    friendly_error="We couldn't extract audio from this video. It may not contain audio."
                 )
             
             audio_file = str(audio_files[0])
@@ -286,17 +399,23 @@ class VideoService:
         except asyncio.TimeoutError:
             return AudioExtractionResult(
                 success=False,
-                error="Audio download timed out after 120 seconds"
+                error="Audio download timed out after 120 seconds",
+                error_code="TIMEOUT",
+                friendly_error="The video took too long to download. Please try again later."
             )
         except FileNotFoundError:
             return AudioExtractionResult(
                 success=False,
-                error="yt-dlp not found. Please install it: pip install yt-dlp"
+                error="yt-dlp not found",
+                error_code="SYSTEM_ERROR",
+                friendly_error="A system error occurred. Please try again later."
             )
         except Exception as e:
             return AudioExtractionResult(
                 success=False,
-                error=str(e)
+                error=str(e),
+                error_code="UNKNOWN_ERROR",
+                friendly_error="An unexpected error occurred. Please try again."
             )
     
     async def _get_audio_duration(self, file_path: str) -> Optional[float]:

@@ -98,6 +98,9 @@ class RecipeExtracted(BaseModel):
     totalEstimatedCost: Optional[float] = None
     costLocation: str = "US Average"
     nutrition: Nutrition = Nutrition()
+    # Confidence/quality indicators for low-quality extractions
+    lowConfidence: Optional[bool] = None
+    confidenceWarning: Optional[str] = None
 
 
 # ============================================================

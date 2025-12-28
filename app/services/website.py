@@ -38,6 +38,8 @@ class WebsiteExtractionResult:
     has_audio_transcript: bool = False  # Always False for websites (no audio)
     error: Optional[str] = None
     error_type: Optional[str] = None  # For Sentry categorization
+    low_confidence: bool = False  # Website extractions are typically high confidence
+    confidence_warning: Optional[str] = None
 
 
 # User-friendly error messages

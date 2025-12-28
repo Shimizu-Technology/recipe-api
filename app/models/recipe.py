@@ -178,6 +178,8 @@ class ExtractionJob(Base):
     estimated_duration = Column(Integer, nullable=False, default=60)  # seconds
     recipe_id = Column(UUID(as_uuid=True), ForeignKey("recipes.id"), nullable=True)
     error_message = Column(Text, nullable=True)
+    low_confidence = Column(Boolean, nullable=True, default=False)  # True if extraction quality is uncertain
+    confidence_warning = Column(Text, nullable=True)  # Warning message for low confidence
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)

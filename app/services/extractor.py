@@ -29,6 +29,135 @@ class FullExtractionResult:
     extraction_quality: str = "low"
     has_audio_transcript: bool = False
     error: Optional[str] = None
+    error_code: Optional[str] = None  # Machine-readable error code
+    friendly_error: Optional[str] = None  # User-friendly error message
+    low_confidence: bool = False  # True if extraction quality is uncertain
+    confidence_warning: Optional[str] = None  # Warning message for low confidence
+
+
+def _check_extraction_confidence(
+    recipe: Optional[dict],
+    raw_text: str,
+    extraction_quality: str,
+    has_audio_transcript: bool
+) -> tuple[bool, Optional[str]]:
+    """
+    Check if the extraction result is low confidence and needs user review.
+    
+    Returns:
+        Tuple of (is_low_confidence, warning_message)
+    """
+    warnings = []
+    
+    # Check 1: No audio transcript (metadata-only extraction)
+    if not has_audio_transcript:
+        if extraction_quality == "low":
+            warnings.append("extracted from limited metadata only")
+    
+    # Check 2: Very short content
+    word_count = len(raw_text.split()) if raw_text else 0
+    if word_count < 50:
+        warnings.append("very little content was found")
+    
+    # Check 3: Detect if transcript is mostly music/non-recipe content
+    # But SKIP this warning if the metadata contains detailed recipe info
+    if raw_text:
+        raw_lower = raw_text.lower()
+        # Count music indicators (🎵, ♪, Ž symbols often appear in music transcripts)
+        music_indicators = raw_text.count('🎵') + raw_text.count('♪') + raw_text.count('Ž')
+        
+        # Check for recipe-related words in the SPOKEN CONTENT section
+        spoken_content = ""
+        if "SPOKEN CONTENT" in raw_text:
+            spoken_content = raw_text.split("SPOKEN CONTENT")[-1].lower()
+        
+        # Also check the metadata section (VIDEO TITLE, description, etc.)
+        metadata_content = ""
+        if "VIDEO TITLE" in raw_text:
+            # Get everything from VIDEO TITLE to SPOKEN CONTENT (if present)
+            metadata_start = raw_text.find("VIDEO TITLE")
+            if "SPOKEN CONTENT" in raw_text:
+                metadata_end = raw_text.find("SPOKEN CONTENT")
+                metadata_content = raw_text[metadata_start:metadata_end].lower()
+            else:
+                metadata_content = raw_text[metadata_start:].lower()
+        
+        recipe_keywords = ["cup", "tablespoon", "teaspoon", "tbsp", "tsp", "ounce", "oz", 
+                          "pound", "lb", "ingredient", "add", "mix", "stir", "cook", 
+                          "bake", "fry", "boil", "simmer", "chop", "dice", "slice",
+                          "minutes", "degrees", "oven", "pan", "pot", "bowl"]
+        
+        # Quantity keywords indicate detailed measurements in metadata
+        quantity_keywords = ["cup", "tbsp", "tsp", "oz", "lb", "gram", "g ", "ml", 
+                            "1/2", "1/4", "1/3", "3/4", "½", "¼", "¾"]
+        
+        recipe_word_count_spoken = sum(1 for kw in recipe_keywords if kw in spoken_content)
+        recipe_word_count_metadata = sum(1 for kw in recipe_keywords if kw in metadata_content)
+        quantity_count_metadata = sum(1 for kw in quantity_keywords if kw in metadata_content)
+        
+        # Metadata is considered "rich" if it has recipe keywords AND quantity indicators
+        metadata_has_rich_recipe_info = recipe_word_count_metadata >= 3 and quantity_count_metadata >= 2
+        
+        # If there are music indicators and very few recipe words in BOTH audio and metadata, flag it
+        if music_indicators >= 3 and recipe_word_count_spoken < 3 and not metadata_has_rich_recipe_info:
+            warnings.append("the audio appears to be mostly music without recipe instructions")
+        elif has_audio_transcript and recipe_word_count_spoken < 2 and len(spoken_content) > 100:
+            # Only flag if metadata doesn't have rich recipe info to compensate
+            if not metadata_has_rich_recipe_info:
+                warnings.append("the audio didn't contain clear recipe instructions")
+    
+    # Check 4: Check recipe completeness
+    if recipe:
+        # Check for missing or empty ingredients
+        components = recipe.get("components", [])
+        total_ingredients = 0
+        vague_ingredients = 0
+        
+        for comp in components:
+            ingredients = comp.get("ingredients", [])
+            total_ingredients += len(ingredients)
+            
+            # Check for vague/placeholder quantities
+            for ing in ingredients:
+                quantity = str(ing.get("quantity", "")).lower()
+                unit = str(ing.get("unit", "")).lower()
+                name = str(ing.get("name", "")).lower()
+                notes = str(ing.get("notes", "")).lower()
+                
+                # Detect vague quantities that indicate AI is guessing
+                vague_patterns = ["to taste", "optional", "your choice", "as needed", 
+                                 "to your liking", "to preference", "adjust to"]
+                if any(vp in quantity or vp in unit or vp in notes or vp in name for vp in vague_patterns):
+                    vague_ingredients += 1
+        
+        if total_ingredients == 0:
+            warnings.append("no ingredients could be identified")
+        elif total_ingredients < 3:
+            warnings.append("very few ingredients were found")
+        elif vague_ingredients > 0 and vague_ingredients >= total_ingredients * 0.5:
+            # More than half the ingredients are vague
+            warnings.append("many ingredient quantities are unclear")
+        
+        # Check for missing steps
+        total_steps = 0
+        for comp in components:
+            steps = comp.get("steps", [])
+            total_steps += len(steps)
+        
+        if total_steps == 0:
+            warnings.append("no cooking steps could be identified")
+        
+        # Check for generic/placeholder title
+        title = recipe.get("title", "").lower()
+        generic_titles = ["recipe", "dish", "food", "meal", "untitled", "unknown"]
+        if any(title == generic for generic in generic_titles) or len(title) < 3:
+            warnings.append("the recipe title may need to be updated")
+    
+    if warnings:
+        warning_msg = "This recipe may need review: " + ", and ".join(warnings[:2]) + "."
+        return True, warning_msg
+    
+    return False, None
 
 
 class RecipeExtractor:
@@ -123,6 +252,8 @@ class RecipeExtractor:
         # Skip audio download in fast_mode (used for re-extraction)
         combined_content = ""
         audio_file_path = None
+        audio_error_code = None  # Track audio error for better error messages
+        audio_friendly_error = None
         
         if fast_mode:
             print("⚡ Fast mode: skipping audio download, using metadata only")
@@ -176,8 +307,12 @@ class RecipeExtractor:
             else:
                 print(f"⚠️ Audio download failed: {audio_result.error}")
                 
+                # Store error info for later use if metadata also fails
+                audio_error_code = audio_result.error_code
+                audio_friendly_error = audio_result.friendly_error
+                
                 # Check for Instagram-specific auth error
-                if audio_result.error == "INSTAGRAM_AUTH_REQUIRED":
+                if audio_result.error_code == "INSTAGRAM_AUTH_REQUIRED":
                     # Don't give up yet - try metadata-only, but flag it
                     print("📝 Instagram requires login - trying metadata-only extraction")
         
@@ -229,6 +364,18 @@ class RecipeExtractor:
         
         # Step 4: Extract recipe with LLM (Gemini primary, GPT fallback)
         if not combined_content.strip():
+            # If we had an audio error with a specific cause, use that
+            if audio_error_code and audio_friendly_error:
+                # For certain error codes, the video is definitively unavailable
+                if audio_error_code in ["VIDEO_UNAVAILABLE", "VIDEO_REMOVED", "VIDEO_PRIVATE", 
+                                        "NOT_FOUND", "ACCOUNT_NOT_FOUND", "MEMBERS_ONLY"]:
+                    return FullExtractionResult(
+                        success=False,
+                        error=audio_friendly_error,
+                        error_code=audio_error_code,
+                        friendly_error=audio_friendly_error
+                    )
+            
             # Provide platform-specific error messages
             if platform == "instagram":
                 # Report Instagram auth failure to Sentry for monitoring
@@ -252,11 +399,18 @@ class RecipeExtractor:
                     error="Instagram requires login to access this content. Try one of these alternatives:\n\n"
                           "• Use Photo Scan to capture the recipe from a screenshot\n"
                           "• Try a TikTok or YouTube video instead\n"
-                          "• If the recipe is in the caption, copy it to the Notes field and try again"
+                          "• If the recipe is in the caption, copy it to the Notes field and try again",
+                    error_code="INSTAGRAM_AUTH_REQUIRED",
+                    friendly_error="This Instagram video requires login to access."
                 )
+            
+            # Use friendly error if we have one, otherwise generic
+            friendly_msg = audio_friendly_error or "We couldn't extract any content from this video. Please check the link and try again."
             return FullExtractionResult(
                 success=False,
-                error="No content could be extracted from the video"
+                error="No content could be extracted from the video",
+                error_code=audio_error_code or "NO_CONTENT",
+                friendly_error=friendly_msg
             )
         
         if progress_callback:
@@ -275,13 +429,26 @@ class RecipeExtractor:
         if not extraction_result.success:
             return FullExtractionResult(
                 success=False,
-                error=extraction_result.error
+                error=extraction_result.error,
+                error_code="LLM_EXTRACTION_FAILED",
+                friendly_error="We couldn't extract a recipe from this video. The content may not contain a clear recipe."
             )
         
         # Add thumbnail to recipe
         recipe = extraction_result.recipe
         if recipe:
             recipe["media"] = {"thumbnail": thumbnail_url}
+        
+        # Check extraction confidence
+        low_confidence, confidence_warning = _check_extraction_confidence(
+            recipe=recipe,
+            raw_text=combined_content,
+            extraction_quality=extraction_quality,
+            has_audio_transcript=has_audio_transcript
+        )
+        
+        if low_confidence:
+            print(f"⚠️ Low confidence extraction: {confidence_warning}")
         
         # Note: Don't send "complete" here - let the router handle that
         # after S3 upload is done to avoid progress going backwards
@@ -293,7 +460,9 @@ class RecipeExtractor:
             thumbnail_url=thumbnail_url,
             extraction_method=extraction_method,
             extraction_quality=extraction_quality,
-            has_audio_transcript=has_audio_transcript
+            has_audio_transcript=has_audio_transcript,
+            low_confidence=low_confidence,
+            confidence_warning=confidence_warning
         )
 
 

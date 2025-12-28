@@ -14,6 +14,7 @@ from app.models.recipe import Recipe, ExtractionJob, RecipeVersion
 from app.services import recipe_extractor, video_service, storage_service
 from app.services.llm_client import llm_service
 from sqlalchemy import func
+from sqlalchemy.orm.attributes import flag_modified
 
 
 def _generate_reextract_change_summary(old_extracted: dict, new_extracted: dict) -> str:
@@ -194,6 +195,8 @@ class JobStatusResponse(BaseModel):
     message: str
     recipe_id: Optional[UUID] = None
     error_message: Optional[str] = None
+    low_confidence: bool = False  # True if extraction quality is uncertain
+    confidence_warning: Optional[str] = None  # Warning message for user
 
 
 # In-memory job storage (for simple implementation)
@@ -253,9 +256,10 @@ async def extract_recipe(
         )
         
         if not extraction_result.success:
+            # Website service already provides friendly error messages
             raise HTTPException(
                 status_code=500,
-                detail=f"Website extraction failed: {extraction_result.error}"
+                detail=extraction_result.error or "We couldn't extract a recipe from this website."
             )
         
         # Save to database
@@ -304,9 +308,11 @@ async def extract_recipe(
     )
     
     if not extraction_result.success:
+        # Use friendly error if available
+        error_detail = extraction_result.friendly_error or extraction_result.error or "Extraction failed"
         raise HTTPException(
             status_code=500,
-            detail=f"Extraction failed: {extraction_result.error}"
+            detail=error_detail
         )
     
     # Save to database with user_id and display name
@@ -533,12 +539,22 @@ async def run_extraction_job(
                     print(f"🚫 Job {job_id} was cancelled during extraction - not saving recipe")
                     return
                 
+                # Add confidence info to extracted JSON if low confidence
+                extracted_data = result.recipe.copy() if result.recipe else {}
+                if result.low_confidence:
+                    extracted_data['lowConfidence'] = True
+                    extracted_data['confidenceWarning'] = result.confidence_warning
+                
+                # Keep a copy of extracted_data before any DB operations
+                # This protects against session state issues
+                saved_extracted = dict(extracted_data)
+                
                 # Save recipe WITH USER ID and display name
                 new_recipe = Recipe(
                     source_url=url,
                     source_type=platform,
                     raw_text=result.raw_text,
-                    extracted=result.recipe,
+                    extracted=extracted_data,
                     thumbnail_url=result.thumbnail_url,
                     extraction_method=result.extraction_method,
                     extraction_quality=result.extraction_quality,
@@ -576,31 +592,45 @@ async def run_extraction_job(
                         str(new_recipe.id)
                     )
                     if s3_url:
-                        # Update recipe with S3 URL
+                        # Update recipe with S3 URL using saved_extracted to preserve lowConfidence
                         new_recipe.thumbnail_url = s3_url
-                        if new_recipe.extracted and "media" in new_recipe.extracted:
-                            new_recipe.extracted["media"]["thumbnail"] = s3_url
+                        if saved_extracted and "media" in saved_extracted:
+                            # Update thumbnail in our preserved copy
+                            saved_extracted["media"] = dict(saved_extracted.get("media", {}))
+                            saved_extracted["media"]["thumbnail"] = s3_url
+                            new_recipe.extracted = saved_extracted
+                            flag_modified(new_recipe, 'extracted')
                         await db.commit()
                 
                 # Update job as completed (only NOW, after everything is done)
+                # Set completion message based on confidence
+                if result.low_confidence:
+                    completion_msg = "Recipe extracted - please review for accuracy"
+                else:
+                    completion_msg = "Recipe extracted successfully!"
+                
                 await update_progress(ExtractionProgress(
                     step="complete",
                     progress=100,
-                    message="Recipe extracted successfully!"
+                    message=completion_msg
                 ))
                 
                 job.status = "completed"
                 job.progress = 100
                 job.current_step = "complete"
-                job.message = "Recipe extracted successfully!"
+                job.message = completion_msg
                 job.recipe_id = new_recipe.id
                 job.completed_at = datetime.utcnow()
+                job.low_confidence = result.low_confidence
+                job.confidence_warning = result.confidence_warning
             else:
                 # Update job as failed
                 job.status = "failed"
                 job.current_step = "error"
-                job.message = f"Extraction failed: {result.error}"
-                job.error_message = result.error
+                # Use friendly error if available, otherwise raw error
+                friendly_msg = result.friendly_error or result.error or "Extraction failed"
+                job.message = friendly_msg
+                job.error_message = friendly_msg  # Show friendly message to user
             
             job.updated_at = datetime.utcnow()
             await db.commit()
@@ -643,7 +673,9 @@ async def get_job_status(
         current_step=job.current_step,
         message=job.message,
         recipe_id=job.recipe_id,
-        error_message=job.error_message
+        error_message=job.error_message,
+        low_confidence=job.low_confidence or False,
+        confidence_warning=job.confidence_warning
     )
 
 
@@ -886,15 +918,25 @@ async def run_re_extraction_job(
                 )
                 db.add(version)
                 
-                # Update existing recipe with new extraction
-                recipe.raw_text = result.raw_text
-                recipe.extracted = new_extracted
-                recipe.extraction_method = result.extraction_method
-                recipe.extraction_quality = result.extraction_quality
-                recipe.has_audio_transcript = result.has_audio_transcript
-                await db.commit()
+                # ============================================================
+                # BUILD ALL RECIPE DATA IN MEMORY FIRST, THEN SINGLE COMMIT
+                # This avoids session state issues with multiple commits
+                # ============================================================
                 
-                # Upload thumbnail to S3 if we got a new one
+                # Make a fresh copy of extracted data
+                final_extracted = dict(new_extracted)
+                
+                # Add confidence info
+                if result.low_confidence:
+                    final_extracted['lowConfidence'] = True
+                    final_extracted['confidenceWarning'] = result.confidence_warning
+                    print(f"🔴 Setting lowConfidence=True for recipe {recipe.id}")
+                else:
+                    final_extracted.pop('lowConfidence', None)
+                    final_extracted.pop('confidenceWarning', None)
+                
+                # Upload thumbnail FIRST (before any DB commits) so we have the URL
+                final_thumbnail_url = recipe.thumbnail_url  # Keep existing
                 if result.thumbnail_url:
                     await update_progress(ExtractionProgress(
                         step="saving",
@@ -906,30 +948,59 @@ async def run_re_extraction_job(
                         str(recipe.id)
                     )
                     if s3_url:
-                        recipe.thumbnail_url = s3_url
-                        if recipe.extracted and "media" in recipe.extracted:
-                            recipe.extracted["media"]["thumbnail"] = s3_url
-                        await db.commit()
+                        final_thumbnail_url = s3_url
+                        # Update thumbnail in extracted data
+                        if "media" in final_extracted:
+                            final_extracted["media"] = dict(final_extracted.get("media", {}))
+                            final_extracted["media"]["thumbnail"] = s3_url
+                
+                # Now apply ALL changes to the recipe object at once
+                print(f"🔵 Final extracted has lowConfidence = {final_extracted.get('lowConfidence')}")
+                print(f"🔵 Final extracted keys = {list(final_extracted.keys())}")
+                
+                recipe.raw_text = result.raw_text
+                recipe.extracted = final_extracted
+                recipe.thumbnail_url = final_thumbnail_url
+                recipe.extraction_method = result.extraction_method
+                recipe.extraction_quality = result.extraction_quality
+                recipe.has_audio_transcript = result.has_audio_transcript
+                
+                # Mark as modified for SQLAlchemy
+                flag_modified(recipe, 'extracted')
+                
+                # SINGLE COMMIT for recipe + version together
+                await db.commit()
+                print(f"🟣 After SINGLE commit, lowConfidence = {recipe.extracted.get('lowConfidence')}")
                 
                 # Update job as completed
+                # Set completion message based on confidence
+                if result.low_confidence:
+                    completion_msg = "Recipe re-extracted - please review for accuracy"
+                else:
+                    completion_msg = "Recipe re-extracted successfully!"
+                
                 await update_progress(ExtractionProgress(
                     step="complete",
                     progress=100,
-                    message="Recipe re-extracted successfully!"
+                    message=completion_msg
                 ))
                 
                 job.status = "completed"
                 job.progress = 100
                 job.current_step = "complete"
-                job.message = "Recipe re-extracted successfully!"
+                job.message = completion_msg
                 job.recipe_id = recipe.id
                 job.completed_at = datetime.utcnow()
+                job.low_confidence = result.low_confidence
+                job.confidence_warning = result.confidence_warning
             else:
                 # Update job as failed
                 job.status = "failed"
                 job.current_step = "error"
-                job.message = f"Re-extraction failed: {result.error}"
-                job.error_message = result.error
+                # Use friendly error if available, otherwise raw error
+                friendly_msg = result.friendly_error or result.error or "Re-extraction failed"
+                job.message = friendly_msg
+                job.error_message = friendly_msg  # Show friendly message to user
             
             job.updated_at = datetime.utcnow()
             await db.commit()
