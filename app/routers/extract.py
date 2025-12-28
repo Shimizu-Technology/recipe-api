@@ -876,13 +876,32 @@ async def run_re_extraction_job(
                 recipe.original_extracted = recipe.extracted.copy()
                 await db.commit()
             
-            # Run full extraction (with audio) for best quality
-            result = await recipe_extractor.extract(
-                url=source_url,
-                location=location,
-                notes="",
-                progress_callback=update_progress
-            )
+            # Detect platform and run appropriate extraction
+            platform = video_service.detect_platform(source_url)
+            
+            if platform == "web":
+                # Website extraction (recipe blogs, etc.)
+                from app.services.website import website_service
+                
+                await update_progress(ExtractionProgress(
+                    step="fetching",
+                    progress=20,
+                    message="Fetching webpage..."
+                ))
+                
+                result = await website_service.extract(
+                    url=source_url,
+                    location=location,
+                    notes=""
+                )
+            else:
+                # Video extraction (TikTok, YouTube, Instagram) - with audio for best quality
+                result = await recipe_extractor.extract(
+                    url=source_url,
+                    location=location,
+                    notes="",
+                    progress_callback=update_progress
+                )
             
             # Get job record
             job_result = await db.execute(
