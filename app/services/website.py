@@ -559,7 +559,9 @@ class WebsiteService:
         # This handles sites like Half Baked Harvest that combine all steps into one
         if len(steps) <= 2:
             combined_text = ' '.join(steps)
-            # Check if text contains numbered steps like "1. Do this 2. Do that"
+            split_performed = False
+            
+            # Pattern 1: Check if text contains numbered steps like "1. Do this 2. Do that"
             if re.search(r'\d+\.\s+\w', combined_text):
                 # Split by numbered pattern - handle cases with/without space before number
                 # Pattern matches: start of string, whitespace, or period/punctuation before a number
@@ -576,8 +578,38 @@ class WebsiteService:
                         i += 1
                 
                 if len(new_steps) > len(steps):
-                    print(f"📋 Split {len(steps)} combined step(s) into {len(new_steps)} individual steps")
+                    print(f"📋 Split {len(steps)} combined step(s) into {len(new_steps)} numbered steps")
                     steps = new_steps
+                    split_performed = True
+            
+            # Pattern 2: Check for title-based steps like "Marinate the Chicken: instructions here. Sear the Chicken: more instructions."
+            # This handles sites like cookingwithgenius.com that use section headers within steps
+            if not split_performed:
+                # Pattern: "Title Word(s): " where title is 2-6 capitalized words followed by colon
+                # Examples: "Marinate the Chicken:", "Build the Base:", "Start the Sauce:"
+                title_pattern = r'([A-Z][a-z]+(?:\s+(?:the\s+)?[A-Za-z&]+){0,5}):\s+'
+                
+                # Check if we have at least 2 title-style sections
+                title_matches = list(re.finditer(title_pattern, combined_text))
+                if len(title_matches) >= 2:
+                    new_steps = []
+                    for i, match in enumerate(title_matches):
+                        title = match.group(1).strip()
+                        start = match.end()
+                        # End is either the start of the next title or end of text
+                        if i + 1 < len(title_matches):
+                            end = title_matches[i + 1].start()
+                        else:
+                            end = len(combined_text)
+                        
+                        instruction_text = combined_text[start:end].strip()
+                        if instruction_text:
+                            # Format as "Title: instruction text"
+                            new_steps.append(f"{title}: {instruction_text}")
+                    
+                    if len(new_steps) > len(steps):
+                        print(f"📋 Split {len(steps)} combined step(s) into {len(new_steps)} title-based steps")
+                        steps = new_steps
         
         # Parse times
         times = {}
