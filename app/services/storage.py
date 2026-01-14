@@ -225,6 +225,77 @@ class StorageService:
             return None
 
 
+    async def upload_chat_image(
+        self,
+        image_base64: str,
+        user_id: str,
+    ) -> Optional[str]:
+        """
+        Upload a base64 chat image to S3.
+        
+        Chat images are stored with the pattern: chat-images/{user_id}/{hash}.jpg
+        This allows images to persist across sessions and be re-sent in chat history.
+        
+        Args:
+            image_base64: Base64 encoded image data
+            user_id: User ID for organizing images
+            
+        Returns:
+            S3 URL if successful, None if failed or S3 not configured
+        """
+        if not self.is_enabled:
+            print("⚠️ S3 not configured, skipping chat image upload")
+            return None
+        
+        if not image_base64:
+            return None
+        
+        try:
+            import base64
+            
+            # Decode base64 to bytes
+            image_data = base64.b64decode(image_base64)
+            
+            # Generate a hash-based filename for deduplication
+            image_hash = hashlib.md5(image_data).hexdigest()[:12]
+            
+            # Determine content type from base64 prefix
+            content_type = "image/jpeg"
+            extension = "jpg"
+            if image_base64.startswith("iVBOR"):
+                content_type = "image/png"
+                extension = "png"
+            elif image_base64.startswith("R0lG"):
+                content_type = "image/gif"
+                extension = "gif"
+            elif image_base64.startswith("UklG"):
+                content_type = "image/webp"
+                extension = "webp"
+            
+            # Upload to S3 under chat-images folder
+            s3_key = f"chat-images/{user_id}/{image_hash}.{extension}"
+            
+            print(f"📤 Uploading chat image to S3: {s3_key}")
+            
+            self.client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=image_data,
+                ContentType=content_type,
+            )
+            
+            # Generate public URL
+            settings = get_settings()
+            s3_url = f"https://{self.bucket_name}.s3.{settings.aws_region}.amazonaws.com/{s3_key}"
+            
+            print(f"✅ Chat image uploaded: {s3_url}")
+            return s3_url
+            
+        except Exception as e:
+            print(f"❌ Failed to upload chat image to S3: {e}")
+            return None
+
+
 # Singleton instance
 storage_service = StorageService()
 

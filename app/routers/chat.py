@@ -14,6 +14,7 @@ from app.db import get_db
 from app.models.recipe import Recipe
 from app.auth import get_current_user, get_optional_user, ClerkUser
 from app.config import get_settings
+from app.services.storage import storage_service
 
 router = APIRouter(prefix="/api/recipes", tags=["chat"])
 settings = get_settings()
@@ -73,6 +74,16 @@ class NutritionEstimate(BaseModel):
 class EstimateNutritionResponse(BaseModel):
     """Response with estimated nutrition."""
     nutrition: NutritionEstimate
+
+
+class UploadChatImageRequest(BaseModel):
+    """Request to upload a chat image to S3."""
+    image_base64: str  # Base64 encoded image
+
+
+class UploadChatImageResponse(BaseModel):
+    """Response with the S3 URL of the uploaded image."""
+    image_url: str
     
 
 # ============================================================
@@ -258,8 +269,10 @@ async def chat_about_recipe(
     
     # Add conversation history
     for msg in request.history[-10:]:  # Limit to last 10 messages for context
-        if msg.image_url:
-            # Message with image - use vision format
+        # Check if this message has an image URL that we can use
+        # Only use URLs that are actual web URLs (S3), not local file:// URIs
+        if msg.image_url and msg.image_url.startswith("https://"):
+            # S3 URL - OpenAI can access this
             messages.append({
                 "role": msg.role,
                 "content": [
@@ -268,6 +281,7 @@ async def chat_about_recipe(
                 ]
             })
         else:
+            # No image or local file URI (can't be accessed by OpenAI)
             messages.append({
                 "role": msg.role,
                 "content": msg.content
@@ -320,6 +334,37 @@ async def chat_about_recipe(
             status_code=500,
             detail="Failed to get response from AI. Please try again."
         )
+
+
+@router.post("/ai/upload-chat-image", response_model=UploadChatImageResponse)
+async def upload_chat_image(
+    request: UploadChatImageRequest,
+    user: ClerkUser = Depends(get_current_user)
+):
+    """
+    Upload a chat image to S3 for persistent storage.
+    
+    This allows images to be stored with permanent URLs that can be
+    included in chat history and re-sent to OpenAI for context.
+    
+    Returns the S3 URL of the uploaded image.
+    """
+    if not request.image_base64:
+        raise HTTPException(status_code=400, detail="No image provided")
+    
+    # Upload to S3
+    s3_url = await storage_service.upload_chat_image(
+        image_base64=request.image_base64,
+        user_id=user.id,
+    )
+    
+    if not s3_url:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to upload image. Please try again."
+        )
+    
+    return UploadChatImageResponse(image_url=s3_url)
 
 
 @router.post("/ai/suggest-tags", response_model=SuggestTagsResponse)
