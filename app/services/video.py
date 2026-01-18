@@ -218,6 +218,184 @@ class VideoService:
         return None
     
     @staticmethod
+    def is_tiktok_photo_post(url: str) -> bool:
+        """
+        Check if a TikTok URL is a photo/slideshow post (not a video).
+        
+        Photo posts have /photo/ in the URL instead of /video/.
+        These are image carousels and cannot be processed with audio extraction.
+        """
+        return "/photo/" in url.lower()
+    
+    @staticmethod
+    def extract_tiktok_photo_id(url: str) -> Optional[str]:
+        """Extract photo ID from a TikTok photo URL."""
+        photo_id_match = re.search(r'/photo/(\d+)', url)
+        if photo_id_match:
+            return photo_id_match.group(1)
+        return None
+    
+    async def fetch_tiktok_photo_images(self, url: str) -> list[str]:
+        """
+        Fetch image URLs from a TikTok photo/slideshow post.
+        
+        Uses yt-dlp to get metadata which includes image URLs for photo posts.
+        Returns a list of image URLs (base64 encoded images or URLs).
+        """
+        print(f"📸 Fetching TikTok photo images from: {url}")
+        
+        try:
+            # Use yt-dlp to dump JSON metadata - it can get image URLs even for photo posts
+            command = [
+                "yt-dlp",
+                "--dump-json",
+                "--no-download",
+                url
+            ]
+            
+            print(f"🔍 Executing: {' '.join(command)}")
+            
+            result = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0 and result.stdout:
+                import json
+                data = json.loads(result.stdout)
+                
+                image_urls = []
+                
+                # TikTok photo posts have images in various fields
+                # Check for 'entries' (slideshow) or direct image fields
+                if 'entries' in data:
+                    # Multi-image slideshow
+                    for entry in data['entries']:
+                        if 'url' in entry:
+                            image_urls.append(entry['url'])
+                        elif 'thumbnail' in entry:
+                            image_urls.append(entry['thumbnail'])
+                
+                # Check for thumbnail as fallback
+                if not image_urls and 'thumbnail' in data:
+                    image_urls.append(data['thumbnail'])
+                
+                # Check for thumbnails array
+                if not image_urls and 'thumbnails' in data:
+                    for thumb in data['thumbnails']:
+                        if 'url' in thumb:
+                            image_urls.append(thumb['url'])
+                
+                print(f"✅ Found {len(image_urls)} images from TikTok photo post")
+                return image_urls
+            else:
+                print(f"⚠️ yt-dlp metadata extraction failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            print("⚠️ yt-dlp timed out fetching photo metadata")
+        except Exception as e:
+            print(f"⚠️ Error fetching TikTok photo images: {e}")
+        
+        # Fallback: Try to scrape the page directly for image URLs
+        return await self._scrape_tiktok_photo_images(url)
+    
+    async def _scrape_tiktok_photo_images(self, url: str) -> list[str]:
+        """
+        Fallback method to scrape TikTok photo images directly from the page.
+        
+        Uses httpx to fetch the page and extract image URLs from meta tags.
+        """
+        print(f"🌐 Scraping TikTok page for images: {url}")
+        
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                follow_redirects=True,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15"
+                }
+            ) as client:
+                response = await client.get(url)
+                
+                if response.status_code == 200:
+                    html = response.text
+                    image_urls = []
+                    
+                    # Extract og:image meta tags (usually has the main image)
+                    og_image_pattern = r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']'
+                    og_matches = re.findall(og_image_pattern, html, re.IGNORECASE)
+                    image_urls.extend(og_matches)
+                    
+                    # Also check for twitter:image
+                    twitter_image_pattern = r'<meta[^>]*name=["\']twitter:image["\'][^>]*content=["\']([^"\']+)["\']'
+                    twitter_matches = re.findall(twitter_image_pattern, html, re.IGNORECASE)
+                    image_urls.extend(twitter_matches)
+                    
+                    # Look for image URLs in JSON data embedded in the page
+                    # TikTok often embeds data in script tags
+                    image_json_pattern = r'"imagePost"[^}]*"images":\s*\[([^\]]+)\]'
+                    json_match = re.search(image_json_pattern, html)
+                    if json_match:
+                        # Extract URLs from the JSON array
+                        url_pattern = r'"imageURL"[^}]*"urlList":\s*\["([^"]+)"'
+                        embedded_urls = re.findall(url_pattern, json_match.group(1))
+                        image_urls.extend(embedded_urls)
+                    
+                    # Deduplicate while preserving order
+                    seen = set()
+                    unique_urls = []
+                    for img_url in image_urls:
+                        if img_url not in seen:
+                            seen.add(img_url)
+                            unique_urls.append(img_url)
+                    
+                    print(f"✅ Scraped {len(unique_urls)} images from TikTok page")
+                    return unique_urls
+                    
+        except Exception as e:
+            print(f"⚠️ Error scraping TikTok page: {e}")
+        
+        return []
+    
+    async def download_images_as_base64(self, image_urls: list[str]) -> list[str]:
+        """
+        Download images from URLs and convert to base64.
+        
+        Returns a list of base64-encoded image strings.
+        """
+        import base64
+        
+        base64_images = []
+        
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15"
+            }
+        ) as client:
+            for i, url in enumerate(image_urls[:10]):  # Limit to 10 images
+                try:
+                    print(f"📥 Downloading image {i+1}/{len(image_urls)}: {url[:80]}...")
+                    response = await client.get(url)
+                    
+                    if response.status_code == 200:
+                        image_data = response.content
+                        base64_str = base64.b64encode(image_data).decode('utf-8')
+                        base64_images.append(base64_str)
+                        print(f"✅ Downloaded image {i+1} ({len(image_data)} bytes)")
+                    else:
+                        print(f"⚠️ Failed to download image {i+1}: HTTP {response.status_code}")
+                        
+                except Exception as e:
+                    print(f"⚠️ Error downloading image {i+1}: {e}")
+        
+        return base64_images
+    
+    @staticmethod
     def extract_youtube_id(url: str) -> Optional[str]:
         """Extract video ID from YouTube URL."""
         patterns = [

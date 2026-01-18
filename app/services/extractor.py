@@ -5,7 +5,7 @@ from typing import Optional
 
 import sentry_sdk
 
-from app.services.video import video_service, VideoMetadata
+from app.services.video import video_service, VideoMetadata, VideoService
 from app.services.openai_client import openai_service  # Still used for Whisper
 from app.services.llm_client import llm_service  # New: Gemini + GPT fallback
 
@@ -207,6 +207,16 @@ class RecipeExtractor:
                 progress=10,
                 message=f"Detected {platform} video"
             ))
+        
+        # Step 1.5: Check for TikTok photo/slideshow posts (special handling)
+        if platform == "tiktok" and VideoService.is_tiktok_photo_post(url):
+            print(f"📸 Detected TikTok photo/slideshow post - using vision extraction")
+            return await self._extract_from_tiktok_photo(
+                url=url,
+                location=location,
+                notes=notes,
+                progress_callback=progress_callback
+            )
         
         # Step 2: Get video metadata via oEmbed
         if progress_callback:
@@ -464,6 +474,150 @@ class RecipeExtractor:
             low_confidence=low_confidence,
             confidence_warning=confidence_warning
         )
+    
+    async def _extract_from_tiktok_photo(
+        self,
+        url: str,
+        location: str = "Guam",
+        notes: str = "",
+        progress_callback=None
+    ) -> FullExtractionResult:
+        """
+        Extract recipe from a TikTok photo/slideshow post using vision AI.
+        
+        TikTok photo posts are image carousels without audio, so we use
+        Gemini 2.0 Flash Vision to analyze the images directly.
+        """
+        print(f"📸 Starting TikTok photo extraction for: {url}")
+        
+        thumbnail_url = None
+        
+        try:
+            # Step 1: Fetch images from the photo post
+            if progress_callback:
+                await progress_callback(ExtractionProgress(
+                    step="fetching_images",
+                    progress=20,
+                    message="Fetching slideshow images..."
+                ))
+            
+            image_urls = await video_service.fetch_tiktok_photo_images(url)
+            
+            if not image_urls:
+                print("❌ No images found in TikTok photo post")
+                return FullExtractionResult(
+                    success=False,
+                    error="Could not extract images from this TikTok post. It may be private or unavailable.",
+                    error_code="NO_IMAGES_FOUND",
+                    friendly_error="We couldn't find any images in this TikTok post. Please try a different post."
+                )
+            
+            # Use first image as thumbnail
+            thumbnail_url = image_urls[0] if image_urls else None
+            print(f"✅ Found {len(image_urls)} images, thumbnail: {thumbnail_url[:80] if thumbnail_url else 'None'}...")
+            
+            # Step 2: Download images as base64
+            if progress_callback:
+                await progress_callback(ExtractionProgress(
+                    step="downloading_images",
+                    progress=35,
+                    message=f"Downloading {len(image_urls)} images..."
+                ))
+            
+            base64_images = await video_service.download_images_as_base64(image_urls)
+            
+            if not base64_images:
+                print("❌ Failed to download any images")
+                return FullExtractionResult(
+                    success=False,
+                    error="Could not download images from this TikTok post.",
+                    error_code="IMAGE_DOWNLOAD_FAILED",
+                    friendly_error="We couldn't download the images from this post. Please try again later."
+                )
+            
+            print(f"✅ Downloaded {len(base64_images)} images as base64")
+            
+            # Step 3: Use vision AI to extract recipe from images
+            if progress_callback:
+                await progress_callback(ExtractionProgress(
+                    step="analyzing",
+                    progress=50,
+                    message="Analyzing images with AI..."
+                ))
+            
+            # Use existing multi-image OCR extraction (Gemini 2.0 Flash primary)
+            if len(base64_images) == 1:
+                result = await llm_service.extract_from_image(
+                    image_base64=base64_images[0],
+                    location=location
+                )
+            else:
+                result = await llm_service.extract_from_images(
+                    images_base64=base64_images,
+                    location=location
+                )
+            
+            if not result.success:
+                print(f"❌ Vision extraction failed: {result.error}")
+                return FullExtractionResult(
+                    success=False,
+                    error=result.error or "Failed to extract recipe from images",
+                    error_code="VISION_EXTRACTION_FAILED",
+                    friendly_error="We couldn't find a recipe in these images. Make sure the post contains recipe information."
+                )
+            
+            # Step 4: Parse the extracted recipe
+            if progress_callback:
+                await progress_callback(ExtractionProgress(
+                    step="extracting",
+                    progress=80,
+                    message="Extracting recipe details..."
+                ))
+            
+            recipe = result.recipe
+            
+            # Add source URL to the recipe
+            if recipe:
+                recipe["source_url"] = url
+            
+            print(f"✅ TikTok photo extraction successful: {recipe.get('title', 'Untitled')}")
+            
+            # Check confidence
+            raw_text = f"[TikTok Photo Post - {len(base64_images)} images analyzed]"
+            low_confidence, confidence_warning = _check_extraction_confidence(
+                recipe=recipe,
+                raw_text=raw_text,
+                extraction_quality="good",  # Vision extraction is typically good
+                has_audio_transcript=False
+            )
+            
+            return FullExtractionResult(
+                success=True,
+                recipe=recipe,
+                raw_text=raw_text,
+                thumbnail_url=thumbnail_url,
+                extraction_method="tiktok_photo_vision",
+                extraction_quality="good",
+                has_audio_transcript=False,
+                low_confidence=low_confidence,
+                confidence_warning=confidence_warning
+            )
+            
+        except Exception as e:
+            print(f"❌ TikTok photo extraction error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Capture in Sentry
+            sentry_sdk.capture_exception(e)
+            
+            return FullExtractionResult(
+                success=False,
+                error=str(e),
+                error_code="TIKTOK_PHOTO_ERROR",
+                friendly_error="Something went wrong while processing this TikTok photo post. Please try again.",
+                thumbnail_url=thumbnail_url
+            )
 
 
 # Singleton instance

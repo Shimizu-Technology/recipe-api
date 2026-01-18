@@ -1287,14 +1287,19 @@ async def check_duplicate(
     print(f"🔍 Normalized URL: {normalized_url}")
     print(f"🔍 User ID: {user.id}")
     
-    # For TikTok, extract video ID for matching
+    # For TikTok, extract video ID or photo ID for matching
     video_id = VideoService.extract_tiktok_video_id(normalized_url)
+    photo_id = VideoService.extract_tiktok_photo_id(normalized_url)
     print(f"🔍 TikTok Video ID: {video_id}")
+    print(f"🔍 TikTok Photo ID: {photo_id}")
     
-    # Build query conditions - match by exact URL or by video ID pattern
+    # Build query conditions - match by exact URL or by video/photo ID pattern
     if video_id:
-        # For TikTok, match any URL containing this video ID
+        # For TikTok videos, match any URL containing this video ID
         url_condition = Recipe.source_url.like(f"%/video/{video_id}%")
+    elif photo_id:
+        # For TikTok photos, match any URL containing this photo ID
+        url_condition = Recipe.source_url.like(f"%/photo/{photo_id}%")
     else:
         # For other platforms, match exact URL or normalized URL
         url_condition = or_(Recipe.source_url == url, Recipe.source_url == normalized_url)
