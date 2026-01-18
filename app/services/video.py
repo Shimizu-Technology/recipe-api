@@ -324,33 +324,67 @@ class VideoService:
                     html = response.text
                     image_urls = []
                     
-                    # Extract og:image meta tags (usually has the main image)
+                    # Method 1: Look for SIGI_STATE JSON data (contains full image list)
+                    # TikTok embeds all data in a script with id="SIGI_STATE" or "__UNIVERSAL_DATA_FOR_REHYDRATION__"
+                    import json as json_module
+                    
+                    # Try to find and parse the embedded JSON data
+                    sigi_pattern = r'<script[^>]*id="(?:SIGI_STATE|__UNIVERSAL_DATA_FOR_REHYDRATION__)"[^>]*>([^<]+)</script>'
+                    sigi_match = re.search(sigi_pattern, html, re.IGNORECASE)
+                    
+                    if sigi_match:
+                        try:
+                            json_str = sigi_match.group(1)
+                            # Find all image URLs in the JSON (they contain tiktokcdn.com)
+                            cdn_url_pattern = r'https?:\\?/\\?/[^"]*tiktokcdn\.com[^"]*'
+                            cdn_urls = re.findall(cdn_url_pattern, json_str)
+                            
+                            # Filter for actual images (contain photomode or similar)
+                            for url in cdn_urls:
+                                if 'photomode' in url or 'tos-maliva' in url:
+                                    image_urls.append(url)
+                        except Exception as e:
+                            print(f"⚠️ Failed to parse SIGI_STATE: {e}")
+                    
+                    # Method 2: Look for imagePost data structure
+                    image_post_pattern = r'"imagePost"\s*:\s*\{[^}]*"images"\s*:\s*\[([^\]]+)\]'
+                    image_post_match = re.search(image_post_pattern, html)
+                    if image_post_match:
+                        # Extract all URLs from the urlList arrays
+                        url_list_pattern = r'"urlList"\s*:\s*\[\s*"([^"]+)"'
+                        urls_in_post = re.findall(url_list_pattern, image_post_match.group(1))
+                        image_urls.extend(urls_in_post)
+                    
+                    # Method 3: Extract og:image meta tags (usually has the main image)
                     og_image_pattern = r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']'
                     og_matches = re.findall(og_image_pattern, html, re.IGNORECASE)
                     image_urls.extend(og_matches)
                     
-                    # Also check for twitter:image
+                    # Method 4: Also check for twitter:image
                     twitter_image_pattern = r'<meta[^>]*name=["\']twitter:image["\'][^>]*content=["\']([^"\']+)["\']'
                     twitter_matches = re.findall(twitter_image_pattern, html, re.IGNORECASE)
                     image_urls.extend(twitter_matches)
                     
-                    # Look for image URLs in JSON data embedded in the page
-                    # TikTok often embeds data in script tags
-                    image_json_pattern = r'"imagePost"[^}]*"images":\s*\[([^\]]+)\]'
-                    json_match = re.search(image_json_pattern, html)
-                    if json_match:
-                        # Extract URLs from the JSON array
-                        url_pattern = r'"imageURL"[^}]*"urlList":\s*\["([^"]+)"'
-                        embedded_urls = re.findall(url_pattern, json_match.group(1))
-                        image_urls.extend(embedded_urls)
-                    
-                    # Deduplicate while preserving order
+                    # Decode Unicode escapes and deduplicate while preserving order
                     seen = set()
                     unique_urls = []
                     for img_url in image_urls:
-                        if img_url not in seen:
-                            seen.add(img_url)
-                            unique_urls.append(img_url)
+                        # Decode Unicode escapes (e.g., \u002F -> /)
+                        try:
+                            decoded_url = img_url.encode().decode('unicode_escape')
+                        except Exception:
+                            decoded_url = img_url
+                        
+                        # Ensure URL has proper protocol
+                        if decoded_url.startswith('//'):
+                            decoded_url = 'https:' + decoded_url
+                        elif not decoded_url.startswith('http'):
+                            # Skip invalid URLs
+                            continue
+                        
+                        if decoded_url not in seen:
+                            seen.add(decoded_url)
+                            unique_urls.append(decoded_url)
                     
                     print(f"✅ Scraped {len(unique_urls)} images from TikTok page")
                     return unique_urls
