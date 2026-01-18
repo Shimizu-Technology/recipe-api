@@ -8,7 +8,7 @@ from typing import Optional
 import httpx
 
 from app.config import get_settings
-from app.services.prompts import get_recipe_extraction_prompt, get_ocr_extraction_prompt, get_multi_image_ocr_prompt
+from app.services.prompts import get_recipe_extraction_prompt, get_ocr_extraction_prompt, get_multi_image_ocr_prompt, get_tiktok_slideshow_prompt
 
 settings = get_settings()
 
@@ -206,6 +206,75 @@ class LLMService:
         return ExtractionResult(
             success=False,
             error="All vision extraction attempts failed"
+        )
+    
+    async def extract_from_tiktok_slideshow(
+        self,
+        images_base64: list[str],
+        location: str = "Guam",
+        use_fallback: bool = True
+    ) -> ExtractionResult:
+        """
+        Extract recipe from TikTok photo/slideshow posts using vision models.
+        
+        TikTok slideshows show recipes VISUALLY with minimal text.
+        Uses a specialized prompt that emphasizes visual analysis.
+        
+        Args:
+            images_base64: List of base64 encoded slideshow images
+            location: Location for cost estimation
+            use_fallback: Whether to fall back to GPT-4o if Gemini fails
+            
+        Returns:
+            ExtractionResult with recipe dict or error
+        """
+        num_images = len(images_base64)
+        print(f"📸 Extracting recipe from {num_images} TikTok slideshow images...")
+        print(f"📍 Location: {location}")
+        total_size = sum(len(img) for img in images_base64) // 1024
+        print(f"🖼️ Total size: {total_size}KB (base64)")
+        
+        # Use TikTok slideshow-specific prompt (visual analysis)
+        prompt = get_tiktok_slideshow_prompt(num_images, location)
+        
+        # Try Gemini Vision first (if API key available)
+        if self.openrouter_api_key:
+            print(f"🚀 Trying {self.GEMINI_VISION_CONFIG['name']} with {num_images} slideshow images...")
+            result = await self._try_multi_image_extraction(
+                config=self.GEMINI_VISION_CONFIG,
+                api_key=self.openrouter_api_key,
+                prompt=prompt,
+                images_base64=images_base64,
+                location=location,
+                is_openrouter=True
+            )
+            
+            if result.success:
+                return result
+            else:
+                print(f"⚠️ {self.GEMINI_VISION_CONFIG['name']} failed: {result.error}")
+        
+        # Fall back to GPT-4o Vision
+        if use_fallback and self.openai_api_key:
+            print(f"🔄 Falling back to {self.GPT_VISION_CONFIG['name']}...")
+            result = await self._try_multi_image_extraction(
+                config=self.GPT_VISION_CONFIG,
+                api_key=self.openai_api_key,
+                prompt=prompt,
+                images_base64=images_base64,
+                location=location,
+                is_openrouter=False
+            )
+            
+            if result.success:
+                return result
+            else:
+                print(f"❌ {self.GPT_VISION_CONFIG['name']} also failed: {result.error}")
+        
+        # Both failed
+        return ExtractionResult(
+            success=False,
+            error="All TikTok slideshow extraction attempts failed"
         )
     
     async def extract_from_images(

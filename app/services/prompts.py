@@ -271,6 +271,88 @@ Return a JSON object with this structure:
 }}"""
 
 
+def get_tiktok_slideshow_prompt(num_images: int, location: str = "Guam") -> str:
+    """
+    Generate recipe extraction prompt for TikTok photo/slideshow posts.
+    
+    TikTok slideshows typically show ingredients and cooking steps VISUALLY,
+    with minimal or no text. This prompt emphasizes visual analysis.
+    """
+    return f"""You are a culinary vision AI. You are analyzing {num_images} images from a TikTok photo slideshow that shows a recipe being prepared.
+
+CRITICAL: This is a VISUAL recipe - you must LOOK AT THE IMAGES to identify:
+- Ingredients shown visually (even without text labels)
+- Cooking steps demonstrated through photos
+- Any text overlays, titles, or captions on the images
+
+SLIDESHOW ANALYSIS APPROACH:
+1. **Examine EVERY image carefully** - each image shows part of the recipe
+2. **Identify ALL visible ingredients** - look at what's in bowls, on cutting boards, in pans
+3. **Understand the cooking process** - images usually show the step-by-step preparation
+4. **Read any text** - TikTok often has text overlays with ingredient names, quantities, or instructions
+5. **Infer what's being made** - understand the dish from the visual progression
+
+TYPICAL TIKTOK SLIDESHOW STRUCTURE:
+- First images: Often show finished dish or title/intro
+- Middle images: Usually show ingredients, measurements, prep steps
+- Later images: Cooking process, techniques, and final presentation
+- Text overlays: Often contain ingredient lists, quantities, and key instructions
+
+EXTRACTION RULES:
+- **EXTRACT ALL INGREDIENTS VISIBLE** in any image - even if just shown briefly
+- **DESCRIBE EACH COOKING STEP** based on what's shown in the images
+- If you see text with ingredients/measurements, use those EXACT values
+- If ingredients are shown without text, estimate reasonable quantities
+- Look for:
+  * Ingredient amounts written on screen
+  * Cooking temperatures or times in text overlays
+  * Recipe title or dish name
+  * Any instructions or tips shown as text
+
+For ingredients:
+- {{"quantity": "2", "unit": "cups", "name": "rice"}} for visible/stated amounts
+- {{"quantity": "1", "unit": null, "name": "salmon fillet"}} when you can count items
+- Use realistic estimates when quantities aren't shown
+
+REGIONAL PRICING for {location}:
+- Guam/Hawaii: 25-40% higher than mainland US (island import costs)
+- Include realistic estimatedCost for each ingredient
+
+REQUIRED OUTPUT:
+- title: The dish name (from text overlay or inferred from images)
+- servings: Estimate based on portion sizes shown
+- times: Estimate prep/cook times from the complexity shown
+- components: Organize by distinct parts (main dish, sauce, garnish, etc.)
+- tags: Include cuisine type, main ingredients, cooking method
+- nutrition: Calculate based on identified ingredients
+
+Return a JSON object:
+{{
+  "title": "Recipe Name",
+  "sourceUrl": "photo-upload",
+  "servings": 2,
+  "times": {{"prep": "15 min", "cook": "20 min", "total": "35 min"}},
+  "components": [
+    {{
+      "name": "Main Dish",
+      "ingredients": [{{"quantity": "1", "unit": "lb", "name": "salmon", "notes": null, "estimatedCost": 12.00}}],
+      "steps": ["Describe what's shown in the cooking process"],
+      "notes": null
+    }}
+  ],
+  "equipment": ["pan", "bowl"],
+  "notes": "Any tips or notes visible in the images",
+  "mealTypes": ["dinner"],
+  "tags": ["salmon", "asian", "healthy"],
+  "totalEstimatedCost": 25.00,
+  "costLocation": "{location}",
+  "nutrition": {{
+    "perServing": {{"calories": 400, "protein": 35, "carbs": 40, "fat": 12, "fiber": 3, "sugar": 5, "sodium": 600}},
+    "total": {{"calories": 800, "protein": 70, "carbs": 80, "fat": 24, "fiber": 6, "sugar": 10, "sodium": 1200}}
+  }}
+}}"""
+
+
 def get_multi_image_ocr_prompt(num_images: int, location: str = "Guam") -> str:
     """
     Generate the OCR recipe extraction prompt for multiple images.

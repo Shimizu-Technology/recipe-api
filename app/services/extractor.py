@@ -553,17 +553,13 @@ class RecipeExtractor:
                     message="Analyzing images with AI..."
                 ))
             
-            # Use existing multi-image OCR extraction (Gemini 2.0 Flash primary)
-            if len(base64_images) == 1:
-                result = await llm_service.extract_from_image(
-                    image_base64=base64_images[0],
-                    location=location
-                )
-            else:
-                result = await llm_service.extract_from_images(
-                    images_base64=base64_images,
-                    location=location
-                )
+            # Use TikTok slideshow extraction (visual analysis prompt)
+            # TikTok slideshows show recipes visually with minimal text,
+            # so we use a specialized prompt that emphasizes visual analysis
+            result = await llm_service.extract_from_tiktok_slideshow(
+                images_base64=base64_images,
+                location=location
+            )
             
             if not result.success:
                 print(f"❌ Vision extraction failed: {result.error}")
