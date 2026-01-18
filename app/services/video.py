@@ -309,167 +309,187 @@ class VideoService:
         TikTok embeds all slideshow data in a JSON script tag. We parse that
         to extract all image URLs from the slideshow.
         
-        IMPORTANT: Must use mobile User-Agent to get the correct JSON structure.
-        Desktop UA gives different/incomplete data.
+        Uses multiple User-Agent strategies since TikTok returns different
+        content based on the request source (local vs server environments).
         """
         print(f"🌐 Scraping TikTok page for all slideshow images: {url}")
         
         import json as json_module
         
-        try:
-            async with httpx.AsyncClient(
-                timeout=20.0,
-                follow_redirects=True,
-                headers={
-                    # CRITICAL: Use mobile user agent - desktop returns different structure
-                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                }
-            ) as client:
-                response = await client.get(url)
-                
-                if response.status_code != 200:
-                    print(f"⚠️ TikTok returned status {response.status_code}")
-                    return []
-                
-                html = response.text
-                image_urls = []
-                
-                # Method 1: Parse __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON (primary method)
-                # This contains the full slideshow data structure
-                universal_pattern = r'<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([^<]+)</script>'
-                universal_match = re.search(universal_pattern, html, re.IGNORECASE)
-                
-                if universal_match:
-                    try:
-                        json_str = universal_match.group(1)
-                        data = json_module.loads(json_str)
+        # Try multiple User-Agents - TikTok returns different content to different clients
+        user_agents = [
+            # Mobile Safari (iOS) - usually has best JSON structure
+            {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            # Chrome Desktop - fallback option
+            {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            },
+        ]
+        
+        html = None
+        
+        for ua_idx, headers in enumerate(user_agents):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=20.0,
+                    follow_redirects=True,
+                    headers=headers
+                ) as client:
+                    response = await client.get(url)
+                    
+                    if response.status_code == 200:
+                        html = response.text
+                        print(f"📄 Fetched page with UA #{ua_idx + 1} ({len(html)} chars)")
+                        break
+                    else:
+                        print(f"⚠️ TikTok returned status {response.status_code} with UA #{ua_idx + 1}")
                         
-                        # Navigate the nested structure to find imagePost.images
-                        # Mobile UA: __DEFAULT_SCOPE__["webapp.reflow.video.detail"]["itemInfo"]["itemStruct"]["imagePost"]["images"]
-                        # Desktop UA: __DEFAULT_SCOPE__["webapp.video-detail"]["itemInfo"]["itemStruct"]["imagePost"]["images"]
-                        default_scope = data.get("__DEFAULT_SCOPE__", {})
-                        
-                        # Try mobile structure first (webapp.reflow.video.detail)
-                        video_detail = default_scope.get("webapp.reflow.video.detail", {})
-                        if not video_detail:
-                            # Fallback to desktop structure (webapp.video-detail)
-                            video_detail = default_scope.get("webapp.video-detail", {})
-                        
+            except Exception as e:
+                print(f"⚠️ Failed to fetch with UA #{ua_idx + 1}: {e}")
+        
+        if not html:
+            print("❌ Failed to fetch TikTok page with any User-Agent")
+            return []
+        
+        image_urls = []
+        
+        # Method 1: Parse __UNIVERSAL_DATA_FOR_REHYDRATION__ JSON (primary method)
+        # This contains the full slideshow data structure
+        universal_pattern = r'<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([^<]+)</script>'
+        universal_match = re.search(universal_pattern, html, re.IGNORECASE)
+        
+        if universal_match:
+            try:
+                json_str = universal_match.group(1)
+                data = json_module.loads(json_str)
+                
+                # Navigate the nested structure to find imagePost.images
+                # Try multiple possible paths since TikTok's structure varies
+                default_scope = data.get("__DEFAULT_SCOPE__", {})
+                
+                # List of possible paths to the video/photo detail
+                detail_paths = [
+                    "webapp.reflow.video.detail",  # Mobile structure
+                    "webapp.video-detail",          # Desktop structure
+                ]
+                
+                for path in detail_paths:
+                    video_detail = default_scope.get(path, {})
+                    if video_detail:
                         item_info = video_detail.get("itemInfo", {})
                         item_struct = item_info.get("itemStruct", {})
                         image_post = item_struct.get("imagePost", {})
                         images = image_post.get("images", [])
                         
-                        print(f"📸 Found {len(images)} images in imagePost structure")
+                        if images:
+                            print(f"📸 Found {len(images)} images via path: {path}")
+                            
+                            for i, img in enumerate(images):
+                                image_url_obj = img.get("imageURL", {})
+                                url_list = image_url_obj.get("urlList", [])
+                                
+                                if url_list:
+                                    img_url = url_list[0]
+                                    image_urls.append(img_url)
+                                    print(f"  📷 Image {i+1}: {img_url[:80]}...")
+                            
+                            print(f"✅ Extracted {len(image_urls)} slideshow images from JSON ({path})")
+                            break  # Found images, stop trying other paths
+                
+                if not image_urls:
+                    print(f"📸 Found 0 images in known JSON structures")
+                    
+            except json_module.JSONDecodeError as e:
+                print(f"⚠️ Failed to parse JSON: {e}")
+            except Exception as e:
+                print(f"⚠️ Failed to extract images from JSON structure: {e}")
+        
+        # Method 2: Try SIGI_STATE (older TikTok format)
+        if not image_urls:
+            sigi_pattern = r'<script[^>]*id="SIGI_STATE"[^>]*>([^<]+)</script>'
+            sigi_match = re.search(sigi_pattern, html, re.IGNORECASE)
+            
+            if sigi_match:
+                try:
+                    json_str = sigi_match.group(1)
+                    data = json_module.loads(json_str)
+                    
+                    # Try to find images in ItemModule
+                    item_module = data.get("ItemModule", {})
+                    for item_id, item in item_module.items():
+                        image_post = item.get("imagePost", {})
+                        images = image_post.get("images", [])
                         
-                        for i, img in enumerate(images):
-                            # Each image has imageURL.urlList - get the first (highest quality)
+                        for img in images:
                             image_url_obj = img.get("imageURL", {})
                             url_list = image_url_obj.get("urlList", [])
-                            
                             if url_list:
-                                # Get the first URL (usually highest quality)
-                                img_url = url_list[0]
-                                image_urls.append(img_url)
-                                print(f"  📷 Image {i+1}: {img_url[:80]}...")
+                                image_urls.append(url_list[0])
+                    
+                    if image_urls:
+                        print(f"✅ Extracted {len(image_urls)} images from SIGI_STATE")
                         
-                        if image_urls:
-                            print(f"✅ Extracted {len(image_urls)} slideshow images from JSON")
-                            
-                    except json_module.JSONDecodeError as e:
-                        print(f"⚠️ Failed to parse JSON: {e}")
-                    except Exception as e:
-                        print(f"⚠️ Failed to extract images from JSON structure: {e}")
-                
-                # Method 2: Try SIGI_STATE (older TikTok format)
-                if not image_urls:
-                    sigi_pattern = r'<script[^>]*id="SIGI_STATE"[^>]*>([^<]+)</script>'
-                    sigi_match = re.search(sigi_pattern, html, re.IGNORECASE)
-                    
-                    if sigi_match:
-                        try:
-                            json_str = sigi_match.group(1)
-                            data = json_module.loads(json_str)
-                            
-                            # Try to find images in ItemModule
-                            item_module = data.get("ItemModule", {})
-                            for item_id, item in item_module.items():
-                                image_post = item.get("imagePost", {})
-                                images = image_post.get("images", [])
-                                
-                                for img in images:
-                                    image_url_obj = img.get("imageURL", {})
-                                    url_list = image_url_obj.get("urlList", [])
-                                    if url_list:
-                                        image_urls.append(url_list[0])
-                            
-                            if image_urls:
-                                print(f"✅ Extracted {len(image_urls)} images from SIGI_STATE")
-                                
-                        except Exception as e:
-                            print(f"⚠️ Failed to parse SIGI_STATE: {e}")
-                
-                # Method 3: Regex fallback - find all photomode image URLs
-                if not image_urls:
-                    print("📝 Falling back to regex pattern matching...")
-                    
-                    # Look for urlList patterns with photomode images
-                    url_list_pattern = r'"urlList"\s*:\s*\[\s*"(https?:[^"]+photomode[^"]+)"'
-                    regex_urls = re.findall(url_list_pattern, html)
-                    
-                    if regex_urls:
-                        # Decode unicode escapes
-                        for raw_url in regex_urls:
-                            try:
-                                decoded = raw_url.encode().decode('unicode_escape')
-                                image_urls.append(decoded)
-                            except:
-                                image_urls.append(raw_url)
-                        
-                        print(f"✅ Found {len(image_urls)} images via regex")
-                
-                # Method 4: og:image fallback (only gets 1 image)
-                if not image_urls:
-                    print("📝 Falling back to og:image meta tag...")
-                    og_pattern = r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']'
-                    og_matches = re.findall(og_pattern, html, re.IGNORECASE)
-                    image_urls.extend(og_matches)
-                
-                # Decode Unicode escapes and deduplicate
-                seen = set()
-                unique_urls = []
-                for img_url in image_urls:
-                    # Decode Unicode escapes (e.g., \u002F -> /)
-                    try:
-                        if '\\u' in img_url:
-                            decoded_url = img_url.encode().decode('unicode_escape')
-                        else:
-                            decoded_url = img_url
-                    except Exception:
-                        decoded_url = img_url
-                    
-                    # Ensure URL has proper protocol
-                    if decoded_url.startswith('//'):
-                        decoded_url = 'https:' + decoded_url
-                    elif not decoded_url.startswith('http'):
-                        continue
-                    
-                    # Skip duplicates
-                    if decoded_url not in seen:
-                        seen.add(decoded_url)
-                        unique_urls.append(decoded_url)
-                
-                print(f"✅ Total unique slideshow images: {len(unique_urls)}")
-                return unique_urls
-                    
-        except Exception as e:
-            print(f"⚠️ Error scraping TikTok page: {e}")
-            import traceback
-            traceback.print_exc()
+                except Exception as e:
+                    print(f"⚠️ Failed to parse SIGI_STATE: {e}")
         
-        return []
+        # Method 3: Regex fallback - find all photomode image URLs
+        if not image_urls:
+            print("📝 Falling back to regex pattern matching...")
+            
+            # Look for urlList patterns with photomode images
+            url_list_pattern = r'"urlList"\s*:\s*\[\s*"(https?:[^"]+photomode[^"]+)"'
+            regex_urls = re.findall(url_list_pattern, html)
+            
+            if regex_urls:
+                # Decode unicode escapes
+                for raw_url in regex_urls:
+                    try:
+                        decoded = raw_url.encode().decode('unicode_escape')
+                        image_urls.append(decoded)
+                    except:
+                        image_urls.append(raw_url)
+                
+                print(f"✅ Found {len(image_urls)} images via regex")
+        
+        # Method 4: og:image fallback (only gets 1 image)
+        if not image_urls:
+            print("📝 Falling back to og:image meta tag...")
+            og_pattern = r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']'
+            og_matches = re.findall(og_pattern, html, re.IGNORECASE)
+            image_urls.extend(og_matches)
+        
+        # Decode Unicode escapes and deduplicate
+        seen = set()
+        unique_urls = []
+        for img_url in image_urls:
+            # Decode Unicode escapes (e.g., \u002F -> /)
+            try:
+                if '\\u' in img_url:
+                    decoded_url = img_url.encode().decode('unicode_escape')
+                else:
+                    decoded_url = img_url
+            except Exception:
+                decoded_url = img_url
+            
+            # Ensure URL has proper protocol
+            if decoded_url.startswith('//'):
+                decoded_url = 'https:' + decoded_url
+            elif not decoded_url.startswith('http'):
+                continue
+            
+            # Skip duplicates
+            if decoded_url not in seen:
+                seen.add(decoded_url)
+                unique_urls.append(decoded_url)
+        
+        print(f"✅ Total unique slideshow images: {len(unique_urls)}")
+        return unique_urls
     
     async def download_images_as_base64(self, image_urls: list[str]) -> list[str]:
         """

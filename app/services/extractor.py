@@ -208,15 +208,23 @@ class RecipeExtractor:
                 message=f"Detected {platform} video"
             ))
         
-        # Step 1.5: Check for TikTok photo/slideshow posts (special handling)
-        if platform == "tiktok" and VideoService.is_tiktok_photo_post(url):
-            print(f"📸 Detected TikTok photo/slideshow post - using vision extraction")
-            return await self._extract_from_tiktok_photo(
-                url=url,
-                location=location,
-                notes=notes,
-                progress_callback=progress_callback
-            )
+        # Step 1.5: For TikTok, resolve short URLs first to detect photo posts correctly
+        # Short URLs like /t/xxx don't contain /photo/ until resolved
+        resolved_url = url
+        if platform == "tiktok":
+            if "/t/" in url or "vm.tiktok.com" in url:
+                print(f"🔗 Resolving TikTok short URL before photo detection...")
+                resolved_url = await VideoService.normalize_url(url)
+            
+            # Now check for photo posts with the resolved URL
+            if VideoService.is_tiktok_photo_post(resolved_url):
+                print(f"📸 Detected TikTok photo/slideshow post - using vision extraction")
+                return await self._extract_from_tiktok_photo(
+                    url=resolved_url,  # Use resolved URL
+                    location=location,
+                    notes=notes,
+                    progress_callback=progress_callback
+                )
         
         # Step 2: Get video metadata via oEmbed
         if progress_callback:
