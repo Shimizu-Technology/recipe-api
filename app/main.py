@@ -25,7 +25,7 @@ if settings.sentry_dsn:
 else:
     print("📊 Sentry not configured (no SENTRY_DSN)")
 
-from app.routers import recipes_router, health_router, extract_router, grocery_router, chat_router, users_router, collections_router, meal_plans_router, tts_router
+from app.routers import recipes_router, health_router, extract_router, grocery_router, chat_router, cooking_chat_router, users_router, collections_router, meal_plans_router, tts_router
 
 # Create FastAPI app
 app = FastAPI(
@@ -57,6 +57,7 @@ app.include_router(recipes_router)
 app.include_router(extract_router)
 app.include_router(grocery_router)
 app.include_router(chat_router)
+app.include_router(cooking_chat_router)
 app.include_router(users_router)
 app.include_router(collections_router)
 app.include_router(meal_plans_router)

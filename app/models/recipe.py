@@ -45,6 +45,10 @@ class Recipe(Base):
     # Legacy recipes (user_id=NULL) are public by default
     is_public = Column(Boolean, nullable=False, default=False, server_default="false")
     
+    # Cached total cook time in minutes for efficient SQL filtering
+    # Parsed from extracted["times"]["total"] when recipe is created/updated
+    total_minutes = Column(Integer, nullable=True, index=True)
+    
     # Relationship to extraction jobs
     extraction_jobs = relationship("ExtractionJob", back_populates="recipe")
     

@@ -1,6 +1,7 @@
 """Recipe extraction API endpoints."""
 
 import base64
+import re
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
@@ -15,6 +16,44 @@ from app.services import recipe_extractor, video_service, storage_service
 from app.services.llm_client import llm_service
 from sqlalchemy import func
 from sqlalchemy.orm.attributes import flag_modified
+
+
+def _parse_time_to_minutes(time_str: str) -> Optional[int]:
+    """Parse time string like '30 minutes', '1 hour', '1h 30m' to minutes."""
+    if not time_str:
+        return None
+    
+    time_str = time_str.lower().strip()
+    total_minutes = 0
+    
+    hours_match = re.search(r'(\d+)\s*(?:hours?|hrs?|h)', time_str)
+    if hours_match:
+        total_minutes += int(hours_match.group(1)) * 60
+    
+    mins_match = re.search(r'(\d+)\s*(?:minutes?|mins?|m(?!onth))', time_str)
+    if mins_match:
+        total_minutes += int(mins_match.group(1))
+    
+    if total_minutes == 0:
+        num_match = re.search(r'(\d+)', time_str)
+        if num_match:
+            total_minutes = int(num_match.group(1))
+    
+    return total_minutes if total_minutes > 0 else None
+
+
+def _compute_total_minutes(extracted: dict) -> Optional[int]:
+    """Compute total_minutes from extracted recipe data for SQL filtering."""
+    if not extracted:
+        return None
+    
+    times = extracted.get("times") or {}
+    total_time = times.get("total") or extracted.get("total_time")
+    
+    if total_time:
+        return _parse_time_to_minutes(str(total_time))
+    
+    return None
 
 
 def _generate_reextract_change_summary(old_extracted: dict, new_extracted: dict) -> str:
@@ -275,6 +314,7 @@ async def extract_recipe(
             user_id=user.id,
             extractor_display_name=user.display_name,
             is_public=request.is_public,
+            total_minutes=_compute_total_minutes(extraction_result.recipe),
         )
         
         db.add(new_recipe)
@@ -328,6 +368,7 @@ async def extract_recipe(
         user_id=user.id,  # Assign to current user
         extractor_display_name=user.display_name,  # Store display name for attribution
         is_public=request.is_public,  # Public by default, user can opt out
+        total_minutes=_compute_total_minutes(extraction_result.recipe),
     )
     
     db.add(new_recipe)
@@ -562,6 +603,7 @@ async def run_extraction_job(
                     user_id=user_id,  # Assign to user
                     extractor_display_name=user_display_name,  # Store display name
                     is_public=is_public,  # Public by default, user can opt out
+                    total_minutes=_compute_total_minutes(extracted_data),
                 )
                 db.add(new_recipe)
                 await db.commit()

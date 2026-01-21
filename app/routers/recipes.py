@@ -475,6 +475,7 @@ async def create_manual_recipe(
         user_id=user.id,
         extractor_display_name=user.display_name,  # Store display name for attribution
         is_public=recipe_input.is_public,
+        total_minutes=compute_total_minutes(extracted),  # Compute for SQL filtering
     )
     
     db.add(new_recipe)
@@ -542,6 +543,7 @@ async def save_ocr_recipe(
         user_id=user.id,
         extractor_display_name=user.display_name,  # Store display name for attribution
         is_public=ocr_data.is_public,
+        total_minutes=compute_total_minutes(extracted),  # Compute for SQL filtering
     )
     
     db.add(new_recipe)
@@ -601,6 +603,7 @@ async def get_public_recipes(
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     sort: str = Query(default="recent", description="Sort order: recent, random, or popular"),
     extractor_id: Optional[str] = Query(default=None, description="Filter by extractor user ID"),
+    meal_type: Optional[str] = Query(default=None, description="Filter by meal type: breakfast, lunch, dinner, snack, dessert"),
     db: AsyncSession = Depends(get_db),
     user: Optional[ClerkUser] = Depends(get_optional_user),
 ):
@@ -613,6 +616,9 @@ async def get_public_recipes(
     - recent: Newest first (default)
     - random: Randomized order (changes on each request)
     - popular: Most saved recipes first
+    
+    Meal type filter:
+    - breakfast, lunch, dinner, snack, dessert
     """
     base_query = select(Recipe).where(Recipe.is_public == True)
     
@@ -623,6 +629,12 @@ async def get_public_recipes(
     # Apply source_type filter if provided
     if source_type and source_type != 'all':
         base_query = base_query.where(Recipe.source_type == source_type)
+    
+    # Apply meal_type filter if provided (search in JSONB array)
+    if meal_type and meal_type != 'all':
+        base_query = base_query.where(
+            Recipe.extracted["mealTypes"].contains([meal_type])
+        )
     
     # Get total count
     count_result = await db.execute(select(func.count()).select_from(base_query.subquery()))
@@ -701,6 +713,47 @@ async def get_public_recipe_count(
     return {"count": count or 0}
 
 
+@router.get("/discover/random", response_model=RecipeListItem)
+async def get_random_recipe(
+    meal_type: Optional[str] = Query(default=None, description="Filter by meal type: breakfast, lunch, dinner, snack, dessert"),
+    source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram, manual"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get a single random public recipe.
+    
+    Optional filters:
+    - meal_type: breakfast, lunch, dinner, snack, dessert
+    - source_type: tiktok, youtube, instagram, manual, website
+    
+    Returns 404 if no matching recipes found.
+    """
+    base_query = select(Recipe).where(Recipe.is_public == True)
+    
+    # Apply meal_type filter if provided
+    if meal_type and meal_type != 'all':
+        base_query = base_query.where(
+            Recipe.extracted["mealTypes"].contains([meal_type])
+        )
+    
+    # Apply source_type filter if provided
+    if source_type and source_type != 'all':
+        base_query = base_query.where(Recipe.source_type == source_type)
+    
+    # Get a random recipe
+    query = base_query.order_by(func.random()).limit(1)
+    result = await db.execute(query)
+    recipe = result.scalar_one_or_none()
+    
+    if not recipe:
+        raise HTTPException(
+            status_code=404,
+            detail="No recipes found matching your filters. Try removing some filters."
+        )
+    
+    return recipe_to_list_item(recipe)
+
+
 def parse_time_to_minutes(time_str: str) -> Optional[int]:
     """Parse time string like '30 minutes', '1 hour', '1h 30m' to minutes."""
     if not time_str:
@@ -729,6 +782,24 @@ def parse_time_to_minutes(time_str: str) -> Optional[int]:
     return total_minutes if total_minutes > 0 else None
 
 
+def compute_total_minutes(extracted: dict) -> Optional[int]:
+    """
+    Compute total_minutes from extracted recipe data.
+    Used when creating/updating recipes to populate the total_minutes column.
+    """
+    if not extracted:
+        return None
+    
+    # Try to get total time from extracted data
+    times = extracted.get("times") or {}
+    total_time = times.get("total") or extracted.get("total_time")
+    
+    if total_time:
+        return parse_time_to_minutes(str(total_time))
+    
+    return None
+
+
 @router.get("/search", response_model=PaginatedRecipes)
 async def search_recipes(
     q: str = Query(default="", description="Search query (searches title, ingredients, tags)"),
@@ -737,17 +808,24 @@ async def search_recipes(
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram, manual"),
     time_filter: Optional[str] = Query(default=None, description="Filter by time: quick (<30min), medium (30-60min), long (60min+)"),
     tags: Optional[str] = Query(default=None, description="Comma-separated tags to filter by"),
+    meal_type: Optional[str] = Query(default=None, description="Filter by meal type: breakfast, lunch, dinner, snack, dessert"),
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
     """
     Search and filter user's recipes with pagination.
     - Search across title, ingredients, and tags
-    - Filter by source type, time, and tags
+    - Filter by source type, time, tags, and meal type
     - Returns paginated results with total count
     """
     # Start with base query
     base_query = select(Recipe).where(Recipe.user_id == user.id)
+    
+    # Apply meal_type filter if provided (search in JSONB array)
+    if meal_type and meal_type != 'all':
+        base_query = base_query.where(
+            Recipe.extracted["mealTypes"].contains([meal_type])
+        )
     
     # Full-text search across multiple fields
     if q and q.strip():
@@ -777,7 +855,16 @@ async def search_recipes(
                 func.lower(Recipe.extracted["tags"].astext).like(f"%{tag}%")
             )
     
-    # Get total count (before pagination, but after search/filters except time)
+    # Filter by time in SQL using the total_minutes column
+    if time_filter and time_filter != 'all':
+        if time_filter == 'quick':
+            base_query = base_query.where(Recipe.total_minutes < 30)
+        elif time_filter == 'medium':
+            base_query = base_query.where(Recipe.total_minutes >= 30, Recipe.total_minutes <= 60)
+        elif time_filter == 'long':
+            base_query = base_query.where(Recipe.total_minutes > 60)
+    
+    # Get total count AFTER all filters are applied
     count_result = await db.execute(select(func.count()).select_from(base_query.subquery()))
     total_count = count_result.scalar() or 0
     
@@ -786,25 +873,6 @@ async def search_recipes(
         base_query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
     )
     recipes = list(result.scalars().all())
-    
-    # Filter by time in Python (since time parsing is complex for SQL)
-    if time_filter and time_filter != 'all':
-        filtered_recipes = []
-        for recipe in recipes:
-            total_time = (recipe.extracted.get("times") or {}).get("total") or recipe.extracted.get("total_time")
-            minutes = parse_time_to_minutes(total_time) if total_time else None
-            
-            if minutes is None:
-                # Include recipes without time info only if not filtering
-                continue
-            elif time_filter == 'quick' and minutes < 30:
-                filtered_recipes.append(recipe)
-            elif time_filter == 'medium' and 30 <= minutes <= 60:
-                filtered_recipes.append(recipe)
-            elif time_filter == 'long' and minutes > 60:
-                filtered_recipes.append(recipe)
-        
-        recipes = filtered_recipes
     
     items = [recipe_to_list_item(r) for r in recipes]
     has_more = offset + len(items) < total_count
@@ -969,12 +1037,13 @@ async def search_public_recipes(
     time_filter: Optional[str] = Query(default=None, description="Filter by time: quick (<30min), medium (30-60min), long (60min+)"),
     tags: Optional[str] = Query(default=None, description="Comma-separated tags to filter by"),
     extractor_id: Optional[str] = Query(default=None, description="Filter by extractor user ID"),
+    meal_type: Optional[str] = Query(default=None, description="Filter by meal type: breakfast, lunch, dinner, snack, dessert"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Search and filter public recipes with pagination.
     - Search across title, ingredients, and tags
-    - Filter by source type, time, tags, and extractor
+    - Filter by source type, time, tags, extractor, and meal type
     - Returns paginated results with total count
     """
     # Start with base query
@@ -983,6 +1052,12 @@ async def search_public_recipes(
     # Filter by extractor user ID if provided
     if extractor_id:
         base_query = base_query.where(Recipe.user_id == extractor_id)
+    
+    # Apply meal_type filter if provided (search in JSONB array)
+    if meal_type and meal_type != 'all':
+        base_query = base_query.where(
+            Recipe.extracted["mealTypes"].contains([meal_type])
+        )
     
     # Full-text search across multiple fields
     if q and q.strip():
@@ -1012,7 +1087,16 @@ async def search_public_recipes(
                 func.lower(Recipe.extracted["tags"].astext).like(f"%{tag}%")
             )
     
-    # Get total count (before pagination, but after search/filters except time)
+    # Filter by time in SQL using the total_minutes column
+    if time_filter and time_filter != 'all':
+        if time_filter == 'quick':
+            base_query = base_query.where(Recipe.total_minutes < 30)
+        elif time_filter == 'medium':
+            base_query = base_query.where(Recipe.total_minutes >= 30, Recipe.total_minutes <= 60)
+        elif time_filter == 'long':
+            base_query = base_query.where(Recipe.total_minutes > 60)
+    
+    # Get total count AFTER all filters are applied
     count_result = await db.execute(select(func.count()).select_from(base_query.subquery()))
     total_count = count_result.scalar() or 0
     
@@ -1021,24 +1105,6 @@ async def search_public_recipes(
         base_query.order_by(Recipe.created_at.desc()).offset(offset).limit(limit)
     )
     recipes = list(result.scalars().all())
-    
-    # Filter by time in Python (since time parsing is complex for SQL)
-    if time_filter and time_filter != 'all':
-        filtered_recipes = []
-        for recipe in recipes:
-            total_time = (recipe.extracted.get("times") or {}).get("total") or recipe.extracted.get("total_time")
-            minutes = parse_time_to_minutes(total_time) if total_time else None
-            
-            if minutes is None:
-                continue
-            elif time_filter == 'quick' and minutes < 30:
-                filtered_recipes.append(recipe)
-            elif time_filter == 'medium' and 30 <= minutes <= 60:
-                filtered_recipes.append(recipe)
-            elif time_filter == 'long' and minutes > 60:
-                filtered_recipes.append(recipe)
-        
-        recipes = filtered_recipes
     
     items = [recipe_to_list_item(r) for r in recipes]
     has_more = offset + len(items) < total_count
@@ -1603,6 +1669,7 @@ async def edit_recipe(
         recipe.original_extracted = dict(recipe.extracted) if recipe.extracted else {}
     
     recipe.extracted = new_extracted
+    recipe.total_minutes = compute_total_minutes(new_extracted)  # Update for SQL filtering
     
     # Update is_public if provided
     if edit.is_public is not None:
@@ -1729,6 +1796,7 @@ async def edit_recipe_with_image(
     
     recipe.extracted = new_extracted
     recipe.thumbnail_url = thumbnail_url
+    recipe.total_minutes = compute_total_minutes(new_extracted)  # Update for SQL filtering
     
     if edit.is_public is not None:
         recipe.is_public = edit.is_public

@@ -17,6 +17,9 @@ from app.config import get_settings
 from app.services.storage import storage_service
 
 router = APIRouter(prefix="/api/recipes", tags=["chat"])
+
+# Separate router for general cooking chat (not recipe-specific)
+cooking_router = APIRouter(prefix="/api/chat", tags=["cooking-chat"])
 settings = get_settings()
 
 # Initialize OpenAI client
@@ -516,5 +519,130 @@ Return ONLY the JSON object, no other text."""
         raise HTTPException(
             status_code=500,
             detail="Failed to estimate nutrition. Please try again."
+        )
+
+
+# ============================================================
+# General Cooking Chat Endpoints
+# ============================================================
+
+COOKING_ASSISTANT_SYSTEM_PROMPT = """You are a friendly, knowledgeable cooking assistant. You help with all kinds of food and cooking questions.
+
+Your expertise includes:
+1. Recipe suggestions based on available ingredients
+2. Cooking techniques and tips
+3. Food safety and storage guidelines
+4. Ingredient substitutions
+5. Dietary advice (allergies, restrictions, nutrition)
+6. Kitchen equipment recommendations
+7. Meal planning ideas
+8. Wine and beverage pairings
+9. Food science explanations
+10. Cultural and regional cuisine knowledge
+
+IMPORTANT - When the user shares a photo:
+- ALWAYS examine the image carefully and provide specific, helpful observations
+- Read any text, labels, or measurements visible in the image
+- For food photos: assess doneness, color, texture, and provide feedback
+- For ingredient photos: identify what you see and suggest uses
+- For kitchen tools/equipment: explain proper use and care
+- Be confident in your visual analysis - users are counting on you!
+
+Guidelines:
+- Be concise but helpful
+- Provide practical, actionable advice
+- When unsure, say so and offer alternatives
+- Be encouraging and supportive
+- Use emojis sparingly to be friendly 🍳
+- If asked about non-food topics, politely redirect to cooking/food
+
+Remember: You're a cooking expert here to help make cooking easier and more enjoyable!"""
+
+
+class GeneralChatRequest(BaseModel):
+    """Request for general cooking chat."""
+    message: str
+    history: list[ChatMessage] = []
+    image_base64: Optional[str] = None
+
+
+@cooking_router.post("/cooking", response_model=ChatResponse)
+async def chat_cooking_assistant(
+    request: GeneralChatRequest,
+    user: Optional[ClerkUser] = Depends(get_optional_user)
+):
+    """
+    Chat with a general cooking assistant.
+    
+    Unlike recipe-specific chat, this doesn't require a recipe context.
+    Ask about anything cooking, food, or kitchen related!
+    """
+    # Build messages for OpenAI
+    messages = [
+        {"role": "system", "content": COOKING_ASSISTANT_SYSTEM_PROMPT}
+    ]
+    
+    # Add conversation history
+    for msg in request.history[-10:]:  # Limit to last 10 messages
+        if msg.image_url and msg.image_url.startswith("https://"):
+            # S3 URL - OpenAI can access this
+            messages.append({
+                "role": msg.role,
+                "content": [
+                    {"type": "text", "text": msg.content},
+                    {"type": "image_url", "image_url": {"url": msg.image_url}}
+                ]
+            })
+        else:
+            messages.append({
+                "role": msg.role,
+                "content": msg.content
+            })
+    
+    # Add the current user message (with optional image)
+    if request.image_base64:
+        # Determine MIME type from base64 prefix
+        mime_type = "image/jpeg"
+        if request.image_base64.startswith("/9j/"):
+            mime_type = "image/jpeg"
+        elif request.image_base64.startswith("iVBOR"):
+            mime_type = "image/png"
+        elif request.image_base64.startswith("R0lG"):
+            mime_type = "image/gif"
+        elif request.image_base64.startswith("UklG"):
+            mime_type = "image/webp"
+        
+        image_url = f"data:{mime_type};base64,{request.image_base64}"
+        
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": request.message or "What do you see in this image?"},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
+        })
+    else:
+        messages.append({
+            "role": "user",
+            "content": request.message
+        })
+    
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            max_tokens=1000,
+            temperature=0.7,
+        )
+        
+        assistant_message = response.choices[0].message.content
+        
+        return ChatResponse(response=assistant_message)
+        
+    except Exception as e:
+        print(f"❌ Cooking chat error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get response from AI. Please try again."
         )
 
