@@ -81,6 +81,14 @@ VIDEO_ERROR_PATTERNS = {
         "code": "MEMBERS_ONLY",
         "message": "This video is only available to channel members.",
     },
+    "sign in to confirm you're not a bot": {
+        "code": "BOT_DETECTION",
+        "message": "YouTube is blocking our request. Please try again later.",
+    },
+    "confirm you're not a bot": {
+        "code": "BOT_DETECTION",
+        "message": "YouTube is blocking our request. Please try again later.",
+    },
     # Generic errors
     "unable to extract": {
         "code": "EXTRACTION_FAILED",
@@ -646,18 +654,29 @@ class VideoService:
                 "--output", output_template,
                 "--no-playlist",
                 "--quiet",
-                url
             ]
+            
+            # Add YouTube proxy if configured (required for cloud hosting)
+            # YouTube blocks datacenter IPs, so we need a residential proxy
+            if platform == "youtube" and settings.youtube_proxy:
+                print(f"🔄 Using YouTube proxy for extraction")
+                command.extend([
+                    "--proxy", settings.youtube_proxy,
+                    # Use android_vr client - doesn't require PO Token
+                    "--extractor-args", "youtube:player_client=android_vr",
+                ])
             
             # Add cookies for Instagram if configured
             if platform == "instagram":
                 cookies_path = self._get_instagram_cookies_path()
                 if cookies_path:
-                    command.insert(-1, "--cookies")  # Insert before URL
-                    command.insert(-1, cookies_path)
+                    command.extend(["--cookies", cookies_path])
                     print(f"🍪 Using Instagram cookies from: {cookies_path}")
                 else:
                     print("⚠️ Instagram extraction may fail without cookies")
+            
+            # URL must be last argument
+            command.append(url)
             
             print(f"🎵 Executing: {' '.join(command)}")
             
@@ -761,15 +780,23 @@ class VideoService:
                 "--dump-json",
                 "--no-download",
                 "--quiet",
-                url,
             ]
+            
+            # Add YouTube proxy if configured (required for cloud hosting)
+            if platform == "youtube" and settings.youtube_proxy:
+                command.extend([
+                    "--proxy", settings.youtube_proxy,
+                    "--extractor-args", "youtube:player_client=android_vr",
+                ])
             
             # Add cookies for Instagram if configured
             if platform == "instagram":
                 cookies_path = self._get_instagram_cookies_path()
                 if cookies_path:
-                    command.insert(-1, "--cookies")
-                    command.insert(-1, cookies_path)
+                    command.extend(["--cookies", cookies_path])
+            
+            # URL must be last
+            command.append(url)
             
             process = await asyncio.create_subprocess_exec(
                 *command,

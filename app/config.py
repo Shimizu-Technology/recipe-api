@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # Can be either a file path or the raw cookie content
     instagram_cookies: str | None = None
     
+    # YouTube proxy (required for cloud hosting)
+    # YouTube blocks datacenter IPs, so a residential proxy is needed
+    # Format: http://username:password@p.webshare.io:80
+    youtube_proxy: str | None = None
+    
     # Sentry error monitoring
     sentry_dsn: str | None = None
     

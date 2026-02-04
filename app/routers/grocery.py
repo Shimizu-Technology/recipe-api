@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import UUID
 from typing import Optional
 from datetime import datetime
@@ -74,20 +74,20 @@ async def get_or_create_user_list(db: AsyncSession, user: ClerkUser) -> GroceryL
 
 class GroceryItemCreate(BaseModel):
     """Request to add a grocery item."""
-    name: str
-    quantity: Optional[str] = None
-    unit: Optional[str] = None
-    notes: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=255, description="Item name (max 255 characters)")
+    quantity: Optional[str] = Field(None, max_length=50)
+    unit: Optional[str] = Field(None, max_length=50)
+    notes: Optional[str] = Field(None, max_length=255)
     recipe_id: Optional[UUID] = None
-    recipe_title: Optional[str] = None
+    recipe_title: Optional[str] = Field(None, max_length=255)
 
 
 class GroceryItemUpdate(BaseModel):
     """Request to update a grocery item."""
-    name: Optional[str] = None
-    quantity: Optional[str] = None
-    unit: Optional[str] = None
-    notes: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    quantity: Optional[str] = Field(None, max_length=50)
+    unit: Optional[str] = Field(None, max_length=50)
+    notes: Optional[str] = Field(None, max_length=255)
     checked: Optional[bool] = None
 
 
@@ -111,7 +111,7 @@ class GroceryItemResponse(BaseModel):
 class AddFromRecipeRequest(BaseModel):
     """Request to add ingredients from a recipe."""
     recipe_id: UUID
-    recipe_title: str
+    recipe_title: str = Field(..., max_length=255)
     ingredients: list[GroceryItemCreate]
 
 
