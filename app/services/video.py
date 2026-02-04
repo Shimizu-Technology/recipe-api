@@ -666,8 +666,13 @@ class VideoService:
                     "--extractor-args", "youtube:player_client=android_vr",
                 ])
             
-            # Add cookies for Instagram if configured
+            # Add proxy + cookies for Instagram if configured
+            # Instagram also blocks datacenter IPs like YouTube
             if platform == "instagram":
+                if settings.youtube_proxy:
+                    print(f"🔄 Using residential proxy for Instagram extraction")
+                    command.extend(["--proxy", settings.youtube_proxy])
+                
                 cookies_path = self._get_instagram_cookies_path()
                 if cookies_path:
                     command.extend(["--cookies", cookies_path])
@@ -789,8 +794,11 @@ class VideoService:
                     "--extractor-args", "youtube:player_client=android_vr",
                 ])
             
-            # Add cookies for Instagram if configured
+            # Add proxy + cookies for Instagram if configured
             if platform == "instagram":
+                if settings.youtube_proxy:
+                    command.extend(["--proxy", settings.youtube_proxy])
+                
                 cookies_path = self._get_instagram_cookies_path()
                 if cookies_path:
                     command.extend(["--cookies", cookies_path])
