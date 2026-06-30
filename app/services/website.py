@@ -17,7 +17,7 @@ import sentry_sdk
 from bs4 import BeautifulSoup
 from fastapi import HTTPException
 
-from app.security import assert_public_http_url
+from app.security import PublicHTTPTransport, assert_public_http_url
 
 try:
     import extruct
@@ -304,7 +304,6 @@ class WebsiteService:
         current_url = url
 
         for _ in range(max_redirects + 1):
-            await assert_public_http_url(current_url)
             response = await client.get(current_url, headers=headers, follow_redirects=False)
 
             if not response.is_redirect:
@@ -314,7 +313,7 @@ class WebsiteService:
             if not location:
                 return response
 
-            current_url = urljoin(str(response.url), location)
+            current_url = urljoin(current_url, location)
 
         raise httpx.TooManyRedirects(f"Too many redirects fetching {url}")
 
@@ -336,7 +335,7 @@ class WebsiteService:
             
             async with httpx.AsyncClient(
                 timeout=30.0,
-                http2=True,  # Some sites prefer HTTP/2
+                transport=PublicHTTPTransport(),
             ) as client:
                 response = await cls._get_with_safe_redirects(client, url, headers)
                 response.raise_for_status()
@@ -354,7 +353,10 @@ class WebsiteService:
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                         "Accept-Language": "en-US,en;q=0.9",
                     }
-                    async with httpx.AsyncClient(timeout=30.0) as client:
+                    async with httpx.AsyncClient(
+                        timeout=30.0,
+                        transport=PublicHTTPTransport(),
+                    ) as client:
                         response = await cls._get_with_safe_redirects(client, url, minimal_headers)
                         response.raise_for_status()
                         return response.text, None

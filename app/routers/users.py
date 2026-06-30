@@ -1,6 +1,7 @@
 """User management endpoints - account deletion for Apple compliance."""
 
 import httpx
+import sentry_sdk
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -112,20 +113,27 @@ async def delete_account(
 
         await db.commit()
 
-        clerk_deleted = await _delete_clerk_user(user_id)
-
-        return {
-            "message": "Account deleted successfully",
-            "deleted": {
-                "recipes": len(recipe_ids),
-                "collections": len(collection_ids),
-            },
-            "clerk_deleted": clerk_deleted,
-        }
-
     except Exception as e:
         await db.rollback()
+        sentry_sdk.capture_exception(e)
+        print(f"❌ Failed to delete local account data for {user_id}: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to delete account: {str(e)}",
+            detail="Failed to delete account. Please try again.",
         )
+
+    clerk_deleted = False
+    try:
+        clerk_deleted = await _delete_clerk_user(user_id)
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
+        print(f"⚠️ Local account data deleted, but Clerk deletion failed for {user_id}: {e}")
+
+    return {
+        "message": "Account deleted successfully",
+        "deleted": {
+            "recipes": len(recipe_ids),
+            "collections": len(collection_ids),
+        },
+        "clerk_deleted": clerk_deleted,
+    }

@@ -10,7 +10,7 @@ import httpx
 from botocore.exceptions import ClientError
 
 from app.config import get_settings
-from app.security import assert_public_http_url
+from app.security import PublicHTTPTransport
 
 MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024
 MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024
@@ -54,16 +54,14 @@ class StorageService:
         """Download a public HTTP(S) URL, validating every redirect target."""
         current_url = image_url
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, transport=PublicHTTPTransport()) as client:
             for _ in range(6):
-                await assert_public_http_url(current_url)
-
                 async with client.stream("GET", current_url, follow_redirects=False) as response:
                     if response.is_redirect:
                         location = response.headers.get("location")
                         if not location:
                             raise ValueError("Redirect missing Location header")
-                        current_url = urljoin(str(response.url), location)
+                        current_url = urljoin(current_url, location)
                         continue
 
                     response.raise_for_status()
