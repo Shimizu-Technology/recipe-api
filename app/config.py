@@ -1,10 +1,17 @@
 from functools import lru_cache
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
     
     # Database
     database_url: str
@@ -89,11 +96,6 @@ class Settings(BaseSettings):
             "https://www.hafa-recipes.com",
         ]
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"
-    
     @property
     def async_database_url(self) -> str:
         """Convert database URL to async format for SQLAlchemy."""
@@ -103,12 +105,15 @@ class Settings(BaseSettings):
             url = url.replace("postgres://", "postgresql+asyncpg://", 1)
         elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        # Remove sslmode parameter (handled separately by asyncpg)
-        if "?sslmode=" in url:
-            url = url.split("?sslmode=")[0]
-        elif "&sslmode=" in url:
-            url = url.replace("&sslmode=require", "").replace("&sslmode=prefer", "")
-        return url
+        # Remove sslmode parameter (handled separately by asyncpg) while preserving
+        # any other connection parameters in the URL.
+        parts = urlsplit(url)
+        query_params = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key.lower() != "sslmode"
+        ]
+        return urlunsplit(parts._replace(query=urlencode(query_params)))
 
 
 @lru_cache

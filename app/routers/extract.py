@@ -206,6 +206,36 @@ def _compare_steps_detail(old_steps: list, new_steps: list) -> list:
 router = APIRouter(prefix="/api", tags=["extraction"])
 
 
+async def _user_can_access_job(db: AsyncSession, job: ExtractionJob | None, user: ClerkUser) -> bool:
+    """Return True when a job belongs to the user.
+
+    Legacy jobs created before migration 015 have a NULL user_id. To avoid stranding
+    in-flight clients during deploy, claim those unowned jobs on the first
+    authenticated poll/cancel. If the job already links to a recipe, only the
+    recipe owner may claim it.
+    """
+    if not job:
+        return False
+
+    if job.user_id == user.id:
+        return True
+
+    if job.user_id is not None:
+        return False
+
+    if job.recipe_id:
+        recipe_result = await db.execute(select(Recipe.user_id).where(Recipe.id == job.recipe_id))
+        recipe_user_id = recipe_result.scalar_one_or_none()
+        if recipe_user_id and recipe_user_id != user.id:
+            return False
+
+    job.user_id = user.id
+    job.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(job)
+    return True
+
+
 # Request/Response models
 class ExtractRequest(BaseModel):
     """Request to extract a recipe from URL."""
@@ -708,7 +738,7 @@ async def get_job_status(
     )
     job = result.scalar_one_or_none()
     
-    if not job or job.user_id != user.id:
+    if not await _user_can_access_job(db, job, user):
         raise HTTPException(status_code=404, detail="Job not found")
     
     return JobStatusResponse(
@@ -742,7 +772,7 @@ async def cancel_job(
     )
     job = result.scalar_one_or_none()
     
-    if not job or job.user_id != user.id:
+    if not await _user_can_access_job(db, job, user):
         raise HTTPException(status_code=404, detail="Job not found")
     
     # Only allow cancellation of processing jobs
