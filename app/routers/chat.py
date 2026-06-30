@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import ClerkUser, get_current_user
 from app.config import get_settings
 from app.db import get_db
-from app.models.recipe import Recipe
+from app.models.recipe import Recipe, SavedRecipe
 from app.services.storage import storage_service
 
 router = APIRouter(prefix="/api/recipes", tags=["chat"])
@@ -92,6 +92,20 @@ class UploadChatImageResponse(BaseModel):
 # ============================================================
 # Helper Functions
 # ============================================================
+
+async def user_can_access_recipe(db: AsyncSession, recipe: Recipe, user: ClerkUser) -> bool:
+    """Return True if the user owns the recipe, it is public, or they saved it."""
+    if recipe.user_id == user.id or recipe.is_public:
+        return True
+
+    saved_result = await db.execute(
+        select(SavedRecipe).where(
+            SavedRecipe.user_id == user.id,
+            SavedRecipe.recipe_id == recipe.id,
+        )
+    )
+    return saved_result.scalar_one_or_none() is not None
+
 
 def build_recipe_context(recipe: Recipe) -> str:
     """Build a detailed context string from a recipe for the AI."""
@@ -263,8 +277,8 @@ async def chat_about_recipe(
     if not recipe:
         raise HTTPException(status_code=404, detail="Recipe not found")
     
-    # Check authorization - must be owner or recipe must be public
-    if not recipe.is_public and recipe.user_id != user.id:
+    # Check authorization - must be owner, public, or saved by this user
+    if not await user_can_access_recipe(db, recipe, user):
         raise HTTPException(
             status_code=403,
             detail="You don't have permission to access this recipe"
