@@ -1,19 +1,19 @@
 """Recipe chat API endpoints - AI-powered recipe assistant."""
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from pydantic import BaseModel
-from uuid import UUID
-from typing import Optional
 import json
+from typing import Optional
+from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException
 from openai import AsyncOpenAI
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import ClerkUser, get_current_user
+from app.config import get_settings
 from app.db import get_db
 from app.models.recipe import Recipe
-from app.auth import get_current_user, get_optional_user, ClerkUser
-from app.config import get_settings
 from app.services.storage import storage_service
 
 router = APIRouter(prefix="/api/recipes", tags=["chat"])
@@ -241,7 +241,7 @@ async def chat_about_recipe(
     recipe_id: UUID,
     request: ChatRequest,
     db: AsyncSession = Depends(get_db),
-    user: Optional[ClerkUser] = Depends(get_optional_user)
+    user: ClerkUser = Depends(get_current_user)
 ):
     """
     Chat with an AI assistant about a specific recipe.
@@ -264,7 +264,7 @@ async def chat_about_recipe(
         raise HTTPException(status_code=404, detail="Recipe not found")
     
     # Check authorization - must be owner or recipe must be public
-    if not recipe.is_public and (not user or recipe.user_id != user.id):
+    if not recipe.is_public and recipe.user_id != user.id:
         raise HTTPException(
             status_code=403,
             detail="You don't have permission to access this recipe"
@@ -505,7 +505,7 @@ Return ONLY the JSON object, no other text."""
                     fat=int(nutrition.get("fat", 0)),
                 )
             )
-        except (json.JSONDecodeError, ValueError) as e:
+        except (json.JSONDecodeError, ValueError):
             print(f"Failed to parse nutrition JSON: {result}")
             raise HTTPException(
                 status_code=500,
@@ -569,7 +569,7 @@ class GeneralChatRequest(BaseModel):
 @cooking_router.post("/cooking", response_model=ChatResponse)
 async def chat_cooking_assistant(
     request: GeneralChatRequest,
-    user: Optional[ClerkUser] = Depends(get_optional_user)
+    user: ClerkUser = Depends(get_current_user)
 ):
     """
     Chat with a general cooking assistant.

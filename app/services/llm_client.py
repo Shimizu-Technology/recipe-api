@@ -1,14 +1,20 @@
 """LLM service for recipe extraction with Gemini (primary) and GPT fallback."""
 
-import re
-import json
 import asyncio
+import json
+import re
 from dataclasses import dataclass
 from typing import Optional
+
 import httpx
 
 from app.config import get_settings
-from app.services.prompts import get_recipe_extraction_prompt, get_ocr_extraction_prompt, get_multi_image_ocr_prompt, get_tiktok_slideshow_prompt
+from app.services.prompts import (
+    get_multi_image_ocr_prompt,
+    get_ocr_extraction_prompt,
+    get_recipe_extraction_prompt,
+    get_tiktok_slideshow_prompt,
+)
 
 settings = get_settings()
 
@@ -92,7 +98,7 @@ class LLMService:
         Returns:
             ExtractionResult with recipe dict or error
         """
-        print(f"🤖 Extracting recipe...")
+        print("🤖 Extracting recipe...")
         print(f"📍 Location: {location}")
         print(f"📝 Content length: {len(content)} chars")
         
@@ -161,7 +167,7 @@ class LLMService:
         Returns:
             ExtractionResult with recipe dict or error
         """
-        print(f"📸 Extracting recipe from image...")
+        print("📸 Extracting recipe from image...")
         print(f"📍 Location: {location}")
         print(f"🖼️ Image size: {len(image_base64) // 1024}KB (base64)")
         
@@ -354,7 +360,6 @@ class LLMService:
         
         Returns the parsed JSON dict, or None if extraction failed.
         """
-        import time
         
         # Try Gemini first
         if self.openrouter_api_key:

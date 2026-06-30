@@ -4,13 +4,12 @@ Clerk JWT authentication for FastAPI.
 Verifies JWT tokens issued by Clerk and extracts user information.
 """
 
-import httpx
-import jwt
-from jwt import PyJWKClient
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from functools import lru_cache
 from typing import Optional
+
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt import PyJWKClient
 from pydantic import BaseModel
 
 from app.config import get_settings
@@ -65,9 +64,7 @@ def get_jwks_client() -> PyJWKClient:
     """Get or create JWKS client for Clerk."""
     global _jwks_client
     if _jwks_client is None:
-        # Clerk's JWKS endpoint
-        jwks_url = f"https://{settings.clerk_frontend_api}/.well-known/jwks.json"
-        _jwks_client = PyJWKClient(jwks_url)
+        _jwks_client = PyJWKClient(settings.jwks_url)
     return _jwks_client
 
 
@@ -84,13 +81,17 @@ def verify_clerk_token(token: str) -> ClerkUser:
         
         # Decode and verify the token
         # Add 60 second leeway to handle clock skew between client and server
-        payload = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256"],
-            options={"verify_aud": False},  # Clerk doesn't always set audience
-            leeway=60  # 60 seconds tolerance for clock differences
-        )
+        decode_kwargs = {
+            "key": signing_key.key,
+            "algorithms": ["RS256"],
+            "issuer": settings.clerk_issuer,
+            "leeway": 60,  # 60 seconds tolerance for clock differences
+            "options": {"verify_aud": bool(settings.clerk_jwt_audience)},
+        }
+        if settings.clerk_jwt_audience:
+            decode_kwargs["audience"] = settings.clerk_jwt_audience
+
+        payload = jwt.decode(token, **decode_kwargs)
         
         # Extract user info from token
         # public_metadata is included if you've configured your Clerk JWT template

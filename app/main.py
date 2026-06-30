@@ -5,6 +5,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.routers import (
+    chat_router,
+    collections_router,
+    cooking_chat_router,
+    extract_router,
+    grocery_router,
+    health_router,
+    meal_plans_router,
+    recipes_router,
+    tts_router,
+    users_router,
+)
 
 settings = get_settings()
 
@@ -25,8 +37,6 @@ if settings.sentry_dsn:
 else:
     print("📊 Sentry not configured (no SENTRY_DSN)")
 
-from app.routers import recipes_router, health_router, extract_router, grocery_router, chat_router, cooking_chat_router, users_router, collections_router, meal_plans_router, tts_router
-
 # Create FastAPI app
 app = FastAPI(
     title=settings.api_title,
@@ -36,17 +46,12 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS middleware - allow React Native and web clients
+# CORS middleware - browser callers only. React Native does not require CORS.
+allowed_origins = settings.allowed_cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",      # Next.js dev
-        "http://localhost:8081",      # Expo dev
-        "http://localhost:19006",     # Expo web
-        "exp://localhost:8081",       # Expo Go
-        "*",                          # Allow all for development (restrict in prod)
-    ],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials="*" not in allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -81,7 +86,7 @@ async def startup():
     """Run on application startup."""
     print(f"🚀 {settings.api_title} v{settings.api_version}")
     print(f"📍 Environment: {settings.environment}")
-    print(f"📚 Docs: http://localhost:8000/docs")
+    print("📚 Docs: http://localhost:8000/docs")
 
 
 @app.on_event("shutdown")

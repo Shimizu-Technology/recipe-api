@@ -1,19 +1,20 @@
 """Grocery list API endpoints with shared list support."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete, update
-from sqlalchemy.orm import selectinload
-from pydantic import BaseModel, Field
-from uuid import UUID
-from typing import Optional
-from datetime import datetime
 import secrets
 import string
+from datetime import datetime
+from typing import Optional
+from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.auth import ClerkUser, get_current_user
 from app.db import get_db
-from app.models.grocery import GroceryItem, GroceryList, GroceryListMember, GroceryListInvite
-from app.auth import get_current_user, ClerkUser
+from app.models.grocery import GroceryItem, GroceryList, GroceryListInvite, GroceryListMember
 
 router = APIRouter(prefix="/api/grocery", tags=["grocery"])
 
@@ -384,7 +385,7 @@ async def leave_list(
         update(GroceryItem)
         .where(
             GroceryItem.user_id == user.id,
-            GroceryItem.archived == True
+            GroceryItem.archived.is_(True)
         )
         .values(archived=False, list_id=new_list.id)
     )
@@ -444,7 +445,7 @@ async def remove_member(
         update(GroceryItem)
         .where(
             GroceryItem.user_id == member_user_id,
-            GroceryItem.archived == True
+            GroceryItem.archived.is_(True)
         )
         .values(archived=False, list_id=new_list.id)
     )
@@ -474,11 +475,11 @@ async def get_grocery_items(
     
     query = select(GroceryItem).where(
         GroceryItem.list_id == grocery_list.id,
-        GroceryItem.archived == False
+        GroceryItem.archived.is_(False)
     )
     
     if not include_checked:
-        query = query.where(GroceryItem.checked == False)
+        query = query.where(GroceryItem.checked.is_(False))
     
     # Order: unchecked first, then by created_at desc
     query = query.order_by(GroceryItem.checked, GroceryItem.created_at.desc())
@@ -501,7 +502,7 @@ async def get_grocery_count(
     total_result = await db.execute(
         select(func.count(GroceryItem.id)).where(
             GroceryItem.list_id == grocery_list.id,
-            GroceryItem.archived == False
+            GroceryItem.archived.is_(False)
         )
     )
     total = total_result.scalar()
@@ -510,8 +511,8 @@ async def get_grocery_count(
     unchecked_result = await db.execute(
         select(func.count(GroceryItem.id)).where(
             GroceryItem.list_id == grocery_list.id,
-            GroceryItem.archived == False,
-            GroceryItem.checked == False
+            GroceryItem.archived.is_(False),
+            GroceryItem.checked.is_(False)
         )
     )
     unchecked = unchecked_result.scalar()
@@ -605,7 +606,7 @@ async def update_grocery_item(
         select(GroceryItem).where(
             GroceryItem.id == item_id,
             GroceryItem.list_id == grocery_list.id,
-            GroceryItem.archived == False
+            GroceryItem.archived.is_(False)
         )
     )
     item = result.scalar_one_or_none()
@@ -644,7 +645,7 @@ async def toggle_grocery_item(
         select(GroceryItem).where(
             GroceryItem.id == item_id,
             GroceryItem.list_id == grocery_list.id,
-            GroceryItem.archived == False
+            GroceryItem.archived.is_(False)
         )
     )
     item = result.scalar_one_or_none()
@@ -672,7 +673,7 @@ async def delete_grocery_item(
         select(GroceryItem).where(
             GroceryItem.id == item_id,
             GroceryItem.list_id == grocery_list.id,
-            GroceryItem.archived == False
+            GroceryItem.archived.is_(False)
         )
     )
     item = result.scalar_one_or_none()
@@ -697,8 +698,8 @@ async def clear_checked_items(
     result = await db.execute(
         delete(GroceryItem).where(
             GroceryItem.list_id == grocery_list.id,
-            GroceryItem.archived == False,
-            GroceryItem.checked == True
+            GroceryItem.archived.is_(False),
+            GroceryItem.checked.is_(True)
         ).returning(GroceryItem.id)
     )
     deleted_ids = result.scalars().all()
@@ -721,7 +722,7 @@ async def clear_all_items(
     result = await db.execute(
         delete(GroceryItem).where(
             GroceryItem.list_id == grocery_list.id,
-            GroceryItem.archived == False
+            GroceryItem.archived.is_(False)
         ).returning(GroceryItem.id)
     )
     deleted_ids = result.scalars().all()
@@ -745,7 +746,7 @@ async def clear_recipe_items(
     result = await db.execute(
         delete(GroceryItem).where(
             GroceryItem.list_id == grocery_list.id,
-            GroceryItem.archived == False,
+            GroceryItem.archived.is_(False),
             GroceryItem.recipe_id == recipe_id
         ).returning(GroceryItem.id)
     )

@@ -5,7 +5,9 @@ Run with: python -m migrations.012_add_shared_grocery
 """
 
 import asyncio
+
 from sqlalchemy import text
+
 from app.db.database import engine
 
 

@@ -1,10 +1,11 @@
 """SQLAlchemy models matching existing Drizzle schema in Neon database."""
 
-from sqlalchemy import Column, String, Text, Boolean, Integer, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
 import uuid
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 
 from app.db.database import Base
 
@@ -172,7 +173,8 @@ class ExtractionJob(Base):
     __tablename__ = "extraction_jobs"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    url = Column(Text, nullable=False, unique=True)
+    url = Column(Text, nullable=False, index=True)
+    user_id = Column(String(64), nullable=True, index=True)
     location = Column(Text, nullable=False, default="Guam")
     notes = Column(Text, nullable=False, default="")
     status = Column(String(16), nullable=False, default="processing")  # processing|completed|failed

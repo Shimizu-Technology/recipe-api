@@ -1,11 +1,11 @@
 """Health check endpoint."""
 
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_db
 from app.config import get_settings
+from app.db import get_db
 from app.models.schemas import HealthResponse
 
 router = APIRouter(tags=["health"])
@@ -43,6 +43,8 @@ async def trigger_error():
     
     Only use for testing - will throw an error!
     """
-    division_by_zero = 1 / 0
-    return {"this": "won't be reached"}
+    if settings.environment.lower() != "development" and not settings.enable_sentry_debug:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    raise RuntimeError("Sentry debug test error")
 

@@ -9,7 +9,9 @@ Run with: python -m migrations.005_add_original_extracted
 """
 
 import asyncio
+
 from sqlalchemy import text
+
 from app.db.database import engine
 
 

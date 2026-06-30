@@ -2,20 +2,22 @@
 
 import base64
 import re
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
-from pydantic import BaseModel, HttpUrl
+from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
-from datetime import datetime
 
-from app.db import get_db
-from app.models.recipe import Recipe, ExtractionJob, RecipeVersion
-from app.services import recipe_extractor, video_service, storage_service
-from app.services.llm_client import llm_service
-from sqlalchemy import func
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
+
+from app.auth import ClerkUser, get_current_user
+from app.db import get_db
+from app.models.recipe import ExtractionJob, Recipe, RecipeVersion
+from app.services import recipe_extractor, storage_service, video_service
+from app.services.extractor import ExtractionProgress
+from app.services.llm_client import llm_service
 
 
 def _parse_time_to_minutes(time_str: str) -> Optional[int]:
@@ -201,9 +203,6 @@ def _compare_steps_detail(old_steps: list, new_steps: list) -> list:
             changes.append(f"Modified {len(modified_steps)} steps")
     
     return changes
-from app.services.extractor import ExtractionProgress
-from app.auth import get_current_user, ClerkUser
-
 router = APIRouter(prefix="/api", tags=["extraction"])
 
 
@@ -297,8 +296,8 @@ async def extract_recipe(
         if not extraction_result.success:
             # Website service already provides friendly error messages
             raise HTTPException(
-                status_code=500,
-                detail=extraction_result.error or "We couldn't extract a recipe from this website."
+                status_code=400 if extraction_result.error_type == "invalid_url" else 500,
+                detail=extraction_result.error or "We couldn't extract a recipe from this website.",
             )
         
         # Save to database
@@ -435,11 +434,15 @@ async def start_extraction_job(
             "is_existing": True
         }
     
-    # Check for existing extraction job for this URL
+    # Check for an existing extraction job for this URL from this user
     job_result = await db.execute(
-        select(ExtractionJob).where(
-            or_(ExtractionJob.url == original_url, ExtractionJob.url == url)
+        select(ExtractionJob)
+        .where(
+            or_(ExtractionJob.url == original_url, ExtractionJob.url == url),
+            ExtractionJob.user_id == user.id,
         )
+        .order_by(ExtractionJob.created_at.desc())
+        .limit(1)
     )
     existing_job = job_result.scalar_one_or_none()
     
@@ -465,6 +468,7 @@ async def start_extraction_job(
     job = ExtractionJob(
         id=job_id,
         url=url,
+        user_id=user.id,
         location=request.location,
         notes=request.notes,
         status="processing",
@@ -704,7 +708,7 @@ async def get_job_status(
     )
     job = result.scalar_one_or_none()
     
-    if not job:
+    if not job or job.user_id != user.id:
         raise HTTPException(status_code=404, detail="Job not found")
     
     return JobStatusResponse(
@@ -738,7 +742,7 @@ async def cancel_job(
     )
     job = result.scalar_one_or_none()
     
-    if not job:
+    if not job or job.user_id != user.id:
         raise HTTPException(status_code=404, detail="Job not found")
     
     # Only allow cancellation of processing jobs
@@ -821,11 +825,15 @@ async def start_re_extraction_job(
             detail="Cannot re-extract manual recipes. Please edit them directly."
         )
     
-    # Check for existing re-extraction job for this recipe
+    # Check for existing re-extraction job for this recipe from this user
     job_result = await db.execute(
-        select(ExtractionJob).where(
-            ExtractionJob.url == f"re-extract:{recipe_id}"
+        select(ExtractionJob)
+        .where(
+            ExtractionJob.url == f"re-extract:{recipe_id}",
+            ExtractionJob.user_id == user.id,
         )
+        .order_by(ExtractionJob.created_at.desc())
+        .limit(1)
     )
     existing_job = job_result.scalar_one_or_none()
     
@@ -846,6 +854,7 @@ async def start_re_extraction_job(
     job = ExtractionJob(
         id=job_id,
         url=f"re-extract:{recipe_id}",  # Special URL format for re-extraction
+        user_id=user.id,
         location=request.location,
         notes="",
         status="processing",
@@ -1097,6 +1106,7 @@ class OCRExtractionResponse(BaseModel):
 async def extract_recipe_from_image(
     image: UploadFile = File(..., description="Image file of a recipe (handwritten or printed)"),
     location: str = Form(default="Guam", description="Location for cost estimation"),
+    user: ClerkUser = Depends(get_current_user),
 ):
     """
     Extract recipe from an uploaded image using AI vision models.
@@ -1109,7 +1119,7 @@ async def extract_recipe_from_image(
     
     Uses Gemini 2.0 Flash Vision (primary) with GPT-4o Vision fallback.
     """
-    print(f"📸 OCR extraction request received")
+    print("📸 OCR extraction request received")
     print(f"📍 Location: {location}")
     print(f"📁 File: {image.filename}, Content-Type: {image.content_type}")
     
@@ -1167,6 +1177,7 @@ async def extract_recipe_from_image(
 async def extract_recipe_from_multiple_images(
     images: list[UploadFile] = File(..., description="Multiple image files of a recipe"),
     location: str = Form(default="Guam", description="Location for cost estimation"),
+    user: ClerkUser = Depends(get_current_user),
 ):
     """
     Extract recipe from multiple uploaded images using AI vision models.
@@ -1178,7 +1189,7 @@ async def extract_recipe_from_multiple_images(
     
     All images are analyzed together to extract ONE complete recipe.
     """
-    print(f"📸 Multi-image OCR extraction request received")
+    print("📸 Multi-image OCR extraction request received")
     print(f"📍 Location: {location}")
     print(f"🖼️ Number of images: {len(images)}")
     

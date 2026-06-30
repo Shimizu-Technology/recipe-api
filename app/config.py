@@ -1,5 +1,6 @@
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -17,6 +18,8 @@ class Settings(BaseSettings):
     # Clerk Auth
     clerk_secret_key: str | None = None
     clerk_frontend_api: str = "clerk.your-domain.com"  # e.g., "prepared-mole-42.clerk.accounts.dev"
+    clerk_jwt_issuer: str | None = None
+    clerk_jwt_audience: str | None = None
     
     # AWS S3 (for thumbnail storage)
     aws_access_key_id: str | None = None
@@ -41,6 +44,8 @@ class Settings(BaseSettings):
     
     # Environment
     environment: str = "development"
+    cors_origins: str = ""
+    enable_sentry_debug: bool = False
     
     # API Settings
     api_title: str = "Recipe Extractor API"
@@ -54,6 +59,35 @@ class Settings(BaseSettings):
             self.aws_secret_access_key,
             self.s3_bucket_name
         ])
+
+    @property
+    def clerk_issuer(self) -> str:
+        """Expected Clerk JWT issuer."""
+        if self.clerk_jwt_issuer:
+            return self.clerk_jwt_issuer.rstrip("/")
+        frontend_api = self.clerk_frontend_api.rstrip("/")
+        if frontend_api.startswith("http://") or frontend_api.startswith("https://"):
+            return frontend_api
+        return f"https://{frontend_api}"
+
+    @property
+    def jwks_url(self) -> str:
+        """Clerk JWKS endpoint."""
+        return f"{self.clerk_issuer}/.well-known/jwks.json"
+
+    @property
+    def allowed_cors_origins(self) -> list[str]:
+        """Allowed browser origins for CORS."""
+        if self.cors_origins:
+            return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+        if self.environment.lower() == "development":
+            return ["*"]
+
+        return [
+            "https://hafa-recipes.com",
+            "https://www.hafa-recipes.com",
+        ]
     
     class Config:
         env_file = ".env"

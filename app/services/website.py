@@ -6,14 +6,18 @@ Extracts recipes from recipe blog/website URLs using:
 2. AI extraction from main content - fallback for sites without structured data
 """
 
-import httpx
 import json
 import re
-import sentry_sdk
 from dataclasses import dataclass
-from typing import Optional, Any
-from urllib.parse import urlparse
+from typing import Any, Optional
+from urllib.parse import urljoin, urlparse
+
+import httpx
+import sentry_sdk
 from bs4 import BeautifulSoup
+from fastapi import HTTPException
+
+from app.security import assert_public_http_url
 
 try:
     import extruct
@@ -51,6 +55,7 @@ ERROR_MESSAGES = {
     "no_content": "We couldn't find recipe content on this page. Make sure the URL links directly to a recipe.",
     "ai_failed": "We couldn't extract the recipe from this page. The format may be unusual - we've been notified.",
     "parse_error": "Something went wrong while processing this recipe. We've been notified.",
+    "invalid_url": "This URL is not supported.",
 }
 
 
@@ -59,7 +64,7 @@ def _get_domain(url: str) -> str:
     try:
         parsed = urlparse(url)
         return parsed.netloc.lower().replace("www.", "")
-    except:
+    except Exception:
         return "unknown"
 
 
@@ -161,6 +166,8 @@ class WebsiteService:
         domain = _get_domain(url)
         
         try:
+            await assert_public_http_url(url)
+
             # Fetch the HTML
             html, fetch_error = await cls._fetch_html_with_error(url)
             if not html:
@@ -183,7 +190,7 @@ class WebsiteService:
             # Try JSON-LD first (most reliable)
             jsonld_recipe = cls._extract_jsonld_recipe(html, url)
             if jsonld_recipe:
-                print(f"✅ Found JSON-LD recipe schema")
+                print("✅ Found JSON-LD recipe schema")
                 # Also extract ingredient sections from HTML (JSON-LD often flattens them)
                 ingredient_groups = cls._extract_ingredient_groups_from_html(html)
                 recipe = cls._convert_jsonld_to_recipe(jsonld_recipe, url, location, notes, ingredient_groups)
@@ -203,14 +210,14 @@ class WebsiteService:
                         extraction_quality="high",
                     )
                 else:
-                    print(f"⚠️ JSON-LD missing ingredients/steps, falling back to AI")
+                    print("⚠️ JSON-LD missing ingredients/steps, falling back to AI")
                     # Keep the thumbnail from JSON-LD for later
                     jsonld_thumbnail = cls._extract_thumbnail(html, jsonld_recipe)
             else:
-                print(f"⚠️ No JSON-LD recipe found, using AI extraction")
+                print("⚠️ No JSON-LD recipe found, using AI extraction")
             
             # Fallback: Extract main content and use AI
-            print(f"📄 Extracting main content for AI...")
+            print("📄 Extracting main content for AI...")
             main_content = cls._extract_main_content(html)
             if not main_content or len(main_content) < 100:
                 _log_extraction_failure(
@@ -259,6 +266,13 @@ class WebsiteService:
                 extraction_quality="good",
             )
             
+        except HTTPException as e:
+            return WebsiteExtractionResult(
+                success=False,
+                error=str(e.detail) if e.detail else ERROR_MESSAGES["invalid_url"],
+                error_type="invalid_url",
+            )
+
         except Exception as e:
             print(f"❌ Website extraction error: {e}")
             
@@ -279,6 +293,32 @@ class WebsiteService:
             )
     
     @classmethod
+    async def _get_with_safe_redirects(
+        cls,
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+        max_redirects: int = 5,
+    ) -> httpx.Response:
+        """GET a URL while validating each redirect target against SSRF rules."""
+        current_url = url
+
+        for _ in range(max_redirects + 1):
+            await assert_public_http_url(current_url)
+            response = await client.get(current_url, headers=headers, follow_redirects=False)
+
+            if not response.is_redirect:
+                return response
+
+            location = response.headers.get("location")
+            if not location:
+                return response
+
+            current_url = urljoin(str(response.url), location)
+
+        raise httpx.TooManyRedirects(f"Too many redirects fetching {url}")
+
+    @classmethod
     async def _fetch_html_with_error(cls, url: str) -> tuple[Optional[str], Optional[str]]:
         """
         Fetch HTML content from URL with error type.
@@ -295,11 +335,10 @@ class WebsiteService:
             headers["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
             
             async with httpx.AsyncClient(
-                follow_redirects=True, 
                 timeout=30.0,
-                http2=True  # Some sites prefer HTTP/2
+                http2=True,  # Some sites prefer HTTP/2
             ) as client:
-                response = await client.get(url, headers=headers)
+                response = await cls._get_with_safe_redirects(client, url, headers)
                 response.raise_for_status()
                 return response.text, None
                 
@@ -308,17 +347,20 @@ class WebsiteService:
             
             # If 403, try without some security headers (some sites don't like them)
             if status == 403:
-                print(f"⚠️ Got 403, retrying with minimal headers...")
+                print("⚠️ Got 403, retrying with minimal headers...")
                 try:
                     minimal_headers = {
                         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                         "Accept-Language": "en-US,en;q=0.9",
                     }
-                    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-                        response = await client.get(url, headers=minimal_headers)
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await cls._get_with_safe_redirects(client, url, minimal_headers)
                         response.raise_for_status()
                         return response.text, None
+                except HTTPException as e2:
+                    print(f"❌ Retry blocked unsupported URL: {e2.detail}")
+                    return None, "invalid_url"
                 except Exception as e2:
                     print(f"❌ Retry also failed: {e2}")
                     return None, "fetch_403"
@@ -330,6 +372,10 @@ class WebsiteService:
             print(f"❌ Failed to fetch {url}: HTTP {status}")
             return None, "fetch_failed"
             
+        except HTTPException as e:
+            print(f"❌ Blocked unsupported URL while fetching {url}: {e.detail}")
+            return None, "invalid_url"
+
         except httpx.TimeoutException:
             print(f"❌ Timeout fetching {url}")
             return None, "fetch_timeout"
@@ -831,7 +877,7 @@ class WebsiteService:
                 parts.append(f"{seconds} sec")
             
             return ' '.join(parts) if parts else duration
-        except:
+        except Exception:
             return duration
     
     @classmethod
@@ -1028,7 +1074,7 @@ IMPORTANT:
                 
                 # Must have at least 1 ingredient OR 1 step to be considered a valid recipe
                 if total_ingredients == 0 and total_steps == 0:
-                    print(f"⚠️ AI returned recipe with no ingredients and no steps - rejecting")
+                    print("⚠️ AI returned recipe with no ingredients and no steps - rejecting")
                     return None
                 
                 # Add required fields to match schema
