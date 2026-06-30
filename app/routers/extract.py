@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -229,11 +229,23 @@ async def _user_can_access_job(db: AsyncSession, job: ExtractionJob | None, user
         if recipe_user_id and recipe_user_id != user.id:
             return False
 
-    job.user_id = user.id
-    job.updated_at = datetime.utcnow()
+    claim_result = await db.execute(
+        update(ExtractionJob)
+        .where(
+            ExtractionJob.id == job.id,
+            ExtractionJob.user_id.is_(None),
+        )
+        .values(user_id=user.id, updated_at=datetime.utcnow())
+        .returning(ExtractionJob.id)
+    )
+
+    if not claim_result.scalar_one_or_none():
+        await db.rollback()
+        return False
+
     await db.commit()
     await db.refresh(job)
-    return True
+    return job.user_id == user.id
 
 
 # Request/Response models
