@@ -202,11 +202,17 @@ class StorageService:
                 response = self.client.list_objects_v2(**kwargs)
                 objects = response.get("Contents", [])
                 if objects:
-                    self.client.delete_objects(
+                    delete_response = self.client.delete_objects(
                         Bucket=self.bucket_name,
                         Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
                     )
-                    deleted_count += len(objects)
+                    errors = delete_response.get("Errors", [])
+                    if errors:
+                        print(
+                            f"⚠️ Failed to delete {len(errors)} objects under S3 prefix {prefix}: "
+                            f"{errors[:3]}"
+                        )
+                    deleted_count += len(delete_response.get("Deleted", []))
 
                 if not response.get("IsTruncated"):
                     break
