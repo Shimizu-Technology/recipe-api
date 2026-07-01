@@ -3,6 +3,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+UNSUPPORTED_ASYNCPG_QUERY_PARAMS = frozenset({"sslmode", "channel_binding"})
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -108,11 +110,10 @@ class Settings(BaseSettings):
         # Remove libpq/psycopg SSL parameters that asyncpg does not accept as
         # keyword arguments. SSL is configured explicitly in app.db.database.
         parts = urlsplit(url)
-        unsupported_asyncpg_params = {"sslmode", "channel_binding"}
         query_params = [
             (key, value)
             for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if key.lower() not in unsupported_asyncpg_params
+            if key.lower() not in UNSUPPORTED_ASYNCPG_QUERY_PARAMS
         ]
         return urlunsplit(parts._replace(query=urlencode(query_params)))
 
