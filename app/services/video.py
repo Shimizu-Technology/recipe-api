@@ -1,18 +1,31 @@
 """Video processing service using yt-dlp for audio extraction."""
 
+import asyncio
 import os
 import re
-import asyncio
-import tempfile
 import subprocess
-from pathlib import Path
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
+
 import httpx
 
 from app.config import get_settings
 
 settings = get_settings()
+
+
+def _redact_sensitive_values(text: str) -> str:
+    """Remove configured secret values from logs/errors."""
+    if not text:
+        return text
+
+    redacted = text
+    if settings.youtube_proxy:
+        redacted = redacted.replace(settings.youtube_proxy, "<proxy-url>")
+    return redacted
 
 
 # ============================================================
@@ -124,13 +137,13 @@ def get_friendly_video_error(raw_error: str, platform: str = "video") -> tuple[s
     
     # Default fallback based on platform
     if platform == "instagram":
-        return "INSTAGRAM_ERROR", f"We couldn't access this Instagram video. It may be private, deleted, or temporarily unavailable."
+        return "INSTAGRAM_ERROR", "We couldn't access this Instagram video. It may be private, deleted, or temporarily unavailable."
     elif platform == "tiktok":
-        return "TIKTOK_ERROR", f"We couldn't access this TikTok video. It may be private, deleted, or temporarily unavailable."
+        return "TIKTOK_ERROR", "We couldn't access this TikTok video. It may be private, deleted, or temporarily unavailable."
     elif platform == "youtube":
-        return "YOUTUBE_ERROR", f"We couldn't access this YouTube video. It may be private, deleted, or region-restricted."
+        return "YOUTUBE_ERROR", "We couldn't access this YouTube video. It may be private, deleted, or region-restricted."
     else:
-        return "UNKNOWN_ERROR", f"We couldn't process this video. Please check the link and try again."
+        return "UNKNOWN_ERROR", "We couldn't process this video. Please check the link and try again."
 
 
 @dataclass
@@ -161,13 +174,17 @@ class VideoService:
     
     @staticmethod
     def detect_platform(url: str) -> str:
-        """Detect video platform from URL."""
-        url_lower = url.lower()
-        if "youtube.com" in url_lower or "youtu.be" in url_lower:
+        """Detect video platform from URL using the parsed hostname."""
+        try:
+            hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        except Exception:
+            return "web"
+
+        if hostname in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"} or hostname.endswith(".youtube.com"):
             return "youtube"
-        elif "tiktok.com" in url_lower:
+        elif hostname == "tiktok.com" or hostname.endswith(".tiktok.com"):
             return "tiktok"
-        elif "instagram.com" in url_lower:
+        elif hostname == "instagram.com" or hostname.endswith(".instagram.com"):
             return "instagram"
         return "web"
     
@@ -411,7 +428,7 @@ class VideoService:
                             break  # Found images, stop trying other paths
                 
                 if not image_urls:
-                    print(f"📸 Found 0 images in known JSON structures")
+                    print("📸 Found 0 images in known JSON structures")
                     
             except json_module.JSONDecodeError as e:
                 print(f"⚠️ Failed to parse JSON: {e}")
@@ -460,7 +477,7 @@ class VideoService:
                     try:
                         decoded = raw_url.encode().decode('unicode_escape')
                         image_urls.append(decoded)
-                    except:
+                    except UnicodeDecodeError:
                         image_urls.append(raw_url)
                 
                 print(f"✅ Found {len(image_urls)} images via regex")
@@ -659,7 +676,7 @@ class VideoService:
             # Add YouTube proxy if configured (required for cloud hosting)
             # YouTube blocks datacenter IPs, so we need a residential proxy
             if platform == "youtube" and settings.youtube_proxy:
-                print(f"🔄 Using YouTube proxy for extraction")
+                print("🔄 Using YouTube proxy for extraction")
                 command.extend([
                     "--proxy", settings.youtube_proxy,
                     # Use android_vr client - doesn't require PO Token
@@ -670,7 +687,7 @@ class VideoService:
             # Instagram also blocks datacenter IPs like YouTube
             if platform == "instagram":
                 if settings.youtube_proxy:
-                    print(f"🔄 Using residential proxy for Instagram extraction")
+                    print("🔄 Using residential proxy for Instagram extraction")
                     command.extend(["--proxy", settings.youtube_proxy])
                 
                 cookies_path = self._get_instagram_cookies_path()
@@ -683,7 +700,8 @@ class VideoService:
             # URL must be last argument
             command.append(url)
             
-            print(f"🎵 Executing: {' '.join(command)}")
+            safe_command = ["<proxy-url>" if i > 0 and command[i - 1] == "--proxy" else part for i, part in enumerate(command)]
+            print(f"🎵 Executing: {' '.join(safe_command)}")
             
             # Run yt-dlp asynchronously
             process = await asyncio.create_subprocess_exec(
@@ -699,15 +717,16 @@ class VideoService:
             
             if process.returncode != 0:
                 error_msg = stderr.decode() if stderr else "Unknown error"
-                print(f"❌ yt-dlp failed: {error_msg}")
+                safe_error_msg = _redact_sensitive_values(error_msg)
+                print(f"❌ yt-dlp failed: {safe_error_msg}")
                 
                 # Get friendly error message
-                error_code, friendly_error = get_friendly_video_error(error_msg, platform)
+                error_code, friendly_error = get_friendly_video_error(safe_error_msg, platform)
                 print(f"📝 Error code: {error_code}, Message: {friendly_error}")
                 
                 return AudioExtractionResult(
                     success=False,
-                    error=error_msg,  # Keep raw error for logging
+                    error=safe_error_msg,
                     error_code=error_code,
                     friendly_error=friendly_error
                 )

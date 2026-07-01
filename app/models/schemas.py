@@ -7,11 +7,11 @@ These schemas match the TypeScript types from the Next.js app:
 - etc.
 """
 
-from pydantic import BaseModel, Field
-from typing import Optional
 from datetime import datetime
+from typing import Optional
 from uuid import UUID
 
+from pydantic import BaseModel
 
 # ============================================================
 # Nested Types (matching TypeScript interfaces)
@@ -95,6 +95,7 @@ class RecipeExtracted(BaseModel):
     notes: Optional[str] = None
     tags: list[str] = []
     media: Optional[Media] = None
+    mealTypes: list[str] = []
     totalEstimatedCost: Optional[float] = None
     costLocation: str = "US Average"
     nutrition: Nutrition = Nutrition()
@@ -120,6 +121,7 @@ class RecipeResponse(BaseModel):
     has_audio_transcript: bool = False
     created_at: datetime
     user_id: Optional[str] = None
+    extractor_display_name: Optional[str] = None
     is_public: bool = False
     
     class Config:

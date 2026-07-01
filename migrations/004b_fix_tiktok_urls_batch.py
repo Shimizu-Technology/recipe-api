@@ -6,8 +6,10 @@ Processes in batches and commits incrementally to avoid timeouts.
 
 import asyncio
 import re
+
 import httpx
 from sqlalchemy import select, update
+
 from app.db.database import AsyncSessionLocal
 from app.models.recipe import Recipe
 
@@ -31,7 +33,7 @@ async def get_full_tiktok_url(video_id: str) -> str | None:
                     if username_match:
                         username = username_match.group(1)
                         return f"https://www.tiktok.com/@{username}/video/{video_id}"
-    except Exception as e:
+    except Exception:
         pass
     
     return None

@@ -1,11 +1,13 @@
 """Text-to-Speech router using OpenAI TTS API."""
 
-from fastapi import APIRouter, HTTPException
+from typing import Literal
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Literal
-import httpx
 
+from app.auth import ClerkUser, get_current_user
 from app.config import get_settings
 
 router = APIRouter(prefix="/api/tts", tags=["TTS"])
@@ -22,7 +24,10 @@ class TTSRequest(BaseModel):
 
 
 @router.post("")
-async def generate_tts(request: TTSRequest):
+async def generate_tts(
+    request: TTSRequest,
+    user: ClerkUser = Depends(get_current_user),
+):
     """
     Generate speech from text using OpenAI TTS API.
     

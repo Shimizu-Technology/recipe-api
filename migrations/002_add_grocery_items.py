@@ -5,7 +5,9 @@ Run with: python -m migrations.002_add_grocery_items
 """
 
 import asyncio
+
 from sqlalchemy import text
+
 from app.db.database import engine
 
 

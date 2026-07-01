@@ -5,9 +5,9 @@ from typing import Optional
 
 import sentry_sdk
 
-from app.services.video import video_service, VideoMetadata, VideoService
-from app.services.openai_client import openai_service  # Still used for Whisper
 from app.services.llm_client import llm_service  # New: Gemini + GPT fallback
+from app.services.openai_client import openai_service  # Still used for Whisper
+from app.services.video import VideoMetadata, VideoService, video_service
 
 
 @dataclass
@@ -62,7 +62,7 @@ def _check_extraction_confidence(
     # Check 3: Detect if transcript is mostly music/non-recipe content
     # But SKIP this warning if the metadata contains detailed recipe info
     if raw_text:
-        raw_lower = raw_text.lower()
+        raw_text.lower()
         # Count music indicators (🎵, ♪, Ž symbols often appear in music transcripts)
         music_indicators = raw_text.count('🎵') + raw_text.count('♪') + raw_text.count('Ž')
         
@@ -213,12 +213,12 @@ class RecipeExtractor:
         resolved_url = url
         if platform == "tiktok":
             if "/t/" in url or "vm.tiktok.com" in url:
-                print(f"🔗 Resolving TikTok short URL before photo detection...")
+                print("🔗 Resolving TikTok short URL before photo detection...")
                 resolved_url = await VideoService.normalize_url(url)
             
             # Now check for photo posts with the resolved URL
             if VideoService.is_tiktok_photo_post(resolved_url):
-                print(f"📸 Detected TikTok photo/slideshow post - using vision extraction")
+                print("📸 Detected TikTok photo/slideshow post - using vision extraction")
                 return await self._extract_from_tiktok_photo(
                     url=resolved_url,  # Use resolved URL
                     location=location,

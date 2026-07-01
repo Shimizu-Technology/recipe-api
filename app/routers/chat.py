@@ -1,19 +1,19 @@
 """Recipe chat API endpoints - AI-powered recipe assistant."""
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from pydantic import BaseModel
-from uuid import UUID
-from typing import Optional
 import json
+from typing import Optional
+from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException
 from openai import AsyncOpenAI
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_db
-from app.models.recipe import Recipe
-from app.auth import get_current_user, get_optional_user, ClerkUser
+from app.auth import ClerkUser, get_current_user
 from app.config import get_settings
+from app.db import get_db
+from app.models.recipe import Recipe, SavedRecipe
 from app.services.storage import storage_service
 
 router = APIRouter(prefix="/api/recipes", tags=["chat"])
@@ -92,6 +92,20 @@ class UploadChatImageResponse(BaseModel):
 # ============================================================
 # Helper Functions
 # ============================================================
+
+async def user_can_access_recipe(db: AsyncSession, recipe: Recipe, user: ClerkUser) -> bool:
+    """Return True if the user owns the recipe, it is public, or they saved it."""
+    if recipe.user_id == user.id or recipe.is_public:
+        return True
+
+    saved_result = await db.execute(
+        select(SavedRecipe).where(
+            SavedRecipe.user_id == user.id,
+            SavedRecipe.recipe_id == recipe.id,
+        )
+    )
+    return saved_result.scalar_one_or_none() is not None
+
 
 def build_recipe_context(recipe: Recipe) -> str:
     """Build a detailed context string from a recipe for the AI."""
@@ -241,7 +255,7 @@ async def chat_about_recipe(
     recipe_id: UUID,
     request: ChatRequest,
     db: AsyncSession = Depends(get_db),
-    user: Optional[ClerkUser] = Depends(get_optional_user)
+    user: ClerkUser = Depends(get_current_user)
 ):
     """
     Chat with an AI assistant about a specific recipe.
@@ -263,8 +277,8 @@ async def chat_about_recipe(
     if not recipe:
         raise HTTPException(status_code=404, detail="Recipe not found")
     
-    # Check authorization - must be owner or recipe must be public
-    if not recipe.is_public and (not user or recipe.user_id != user.id):
+    # Check authorization - must be owner, public, or saved by this user
+    if not await user_can_access_recipe(db, recipe, user):
         raise HTTPException(
             status_code=403,
             detail="You don't have permission to access this recipe"
@@ -505,7 +519,7 @@ Return ONLY the JSON object, no other text."""
                     fat=int(nutrition.get("fat", 0)),
                 )
             )
-        except (json.JSONDecodeError, ValueError) as e:
+        except (json.JSONDecodeError, ValueError):
             print(f"Failed to parse nutrition JSON: {result}")
             raise HTTPException(
                 status_code=500,
@@ -569,7 +583,7 @@ class GeneralChatRequest(BaseModel):
 @cooking_router.post("/cooking", response_model=ChatResponse)
 async def chat_cooking_assistant(
     request: GeneralChatRequest,
-    user: Optional[ClerkUser] = Depends(get_optional_user)
+    user: ClerkUser = Depends(get_current_user)
 ):
     """
     Chat with a general cooking assistant.

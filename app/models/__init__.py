@@ -1,6 +1,6 @@
-from .recipe import Recipe, ExtractionJob
+from .grocery import GroceryItem, GroceryList, GroceryListInvite, GroceryListMember
 from .meal_plan import MealPlanEntry
-from .grocery import GroceryItem, GroceryList, GroceryListMember, GroceryListInvite
+from .recipe import ExtractionJob, Recipe
 
 __all__ = [
     "Recipe", 

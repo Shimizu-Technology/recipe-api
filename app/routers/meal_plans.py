@@ -1,18 +1,20 @@
 """Meal planning API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, and_
-from pydantic import BaseModel
-from uuid import UUID
-from typing import Optional, List
 from datetime import date, datetime, timedelta
+from typing import List, Optional
+from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth import ClerkUser, get_current_user
 from app.db import get_db
-from app.models.meal_plan import MealPlanEntry
 from app.models.grocery import GroceryItem
-from app.models.recipe import Recipe
-from app.auth import get_current_user, ClerkUser
+from app.models.meal_plan import MealPlanEntry
+from app.models.recipe import Recipe, SavedRecipe
+from app.routers.grocery import get_or_create_user_list
 
 router = APIRouter(prefix="/api/meal-plans", tags=["meal-plans"])
 
@@ -89,6 +91,30 @@ def get_week_bounds(target_date: date) -> tuple[date, date]:
     week_start = target_date - timedelta(days=days_since_monday)
     week_end = week_start + timedelta(days=6)
     return week_start, week_end
+
+
+async def get_accessible_recipe(
+    db: AsyncSession,
+    recipe_id: UUID,
+    user: ClerkUser,
+) -> Optional[Recipe]:
+    """Return a recipe if the user owns it, it is public, or they saved it."""
+    result = await db.execute(select(Recipe).where(Recipe.id == recipe_id))
+    recipe = result.scalar_one_or_none()
+
+    if not recipe:
+        return None
+
+    if recipe.user_id == user.id or recipe.is_public:
+        return recipe
+
+    saved_result = await db.execute(
+        select(SavedRecipe).where(
+            SavedRecipe.user_id == user.id,
+            SavedRecipe.recipe_id == recipe_id,
+        )
+    )
+    return recipe if saved_result.scalar_one_or_none() else None
 
 
 def organize_by_day(entries: List[MealPlanEntry], week_start: date, week_end: date) -> List[DayMeals]:
@@ -210,12 +236,18 @@ async def add_meal(
             detail=f"Invalid meal_type. Must be one of: {', '.join(valid_meal_types)}"
         )
     
+    recipe = await get_accessible_recipe(db, entry.recipe_id, user)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+
+    recipe_title = recipe.extracted.get("title") if recipe.extracted else entry.recipe_title
+
     new_entry = MealPlanEntry(
         user_id=user.id,
         date=entry.date,
         meal_type=entry.meal_type.lower(),
         recipe_id=entry.recipe_id,
-        recipe_title=entry.recipe_title,
+        recipe_title=recipe_title or entry.recipe_title,
         recipe_thumbnail=entry.recipe_thumbnail,
         notes=entry.notes,
         servings=entry.servings,
@@ -346,12 +378,15 @@ async def add_plan_to_grocery(
     # Get unique recipe IDs
     recipe_ids = list(set(entry.recipe_id for entry in entries))
     
-    # Fetch the full recipes to get ingredients
-    recipes_result = await db.execute(
-        select(Recipe).where(Recipe.id.in_(recipe_ids))
-    )
-    recipes = {r.id: r for r in recipes_result.scalars().all()}
+    # Fetch the full recipes to get ingredients, enforcing recipe access for legacy entries.
+    recipes = {}
+    for recipe_id in recipe_ids:
+        recipe = await get_accessible_recipe(db, recipe_id, user)
+        if recipe:
+            recipes[recipe.id] = recipe
     
+    grocery_list = await get_or_create_user_list(db, user)
+
     # Add ingredients to grocery list
     items_added = 0
     for entry in entries:
@@ -368,12 +403,14 @@ async def add_plan_to_grocery(
                 # Create grocery item
                 grocery_item = GroceryItem(
                     user_id=user.id,
+                    list_id=grocery_list.id,
                     name=ing.get("name", "Unknown"),
                     quantity=ing.get("quantity"),
                     unit=ing.get("unit"),
                     notes=ing.get("notes"),
                     recipe_id=entry.recipe_id,
                     recipe_title=entry.recipe_title,
+                    added_by_name=user.display_name,
                     checked=False,
                 )
                 db.add(grocery_item)

@@ -1,10 +1,11 @@
 """OpenAI service for Whisper transcription and GPT recipe extraction."""
 
-import re
 import json
-from pathlib import Path
+import re
 from dataclasses import dataclass
-from typing import Optional, Any
+from pathlib import Path
+from typing import Optional
+
 from openai import AsyncOpenAI
 
 from app.config import get_settings
@@ -98,7 +99,7 @@ class OpenAIService:
         Returns:
             ExtractionResult with recipe dict or error
         """
-        print(f"🤖 Extracting recipe with GPT-4o-mini...")
+        print("🤖 Extracting recipe with GPT-4o-mini...")
         print(f"📍 Location: {location}")
         print(f"📝 Content length: {len(content)} chars")
         

@@ -1,11 +1,11 @@
 """SQLAlchemy models for meal planning."""
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Date, Enum
+import enum
+import uuid
+
+from sqlalchemy import Column, Date, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
-import uuid
-import enum
 
 from app.db.database import Base
 

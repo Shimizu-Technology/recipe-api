@@ -2,18 +2,18 @@
 Collections router - API endpoints for recipe collections/folders.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
-from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
-from typing import Optional, List
-from datetime import datetime
 import uuid
+from datetime import datetime
+from typing import List, Optional
 
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth import ClerkUser, get_current_user
 from app.db.database import get_db
-from app.models.recipe import Collection, CollectionRecipe, Recipe
-from app.auth import get_current_user, ClerkUser
+from app.models.recipe import Collection, CollectionRecipe, Recipe, SavedRecipe
 
 router = APIRouter(prefix="/api/collections", tags=["collections"])
 
@@ -363,13 +363,23 @@ async def add_recipe_to_collection(
     if not collection_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Collection not found")
     
-    # Verify recipe exists and user has access (owns it or it's public or they saved it)
+    # Verify recipe exists and user has access (owns it, it is public, or user saved it)
     recipe_query = select(Recipe).where(Recipe.id == uuid.UUID(data.recipe_id))
     recipe_result = await db.execute(recipe_query)
     recipe = recipe_result.scalar_one_or_none()
     
     if not recipe:
         raise HTTPException(status_code=404, detail="Recipe not found")
+
+    if recipe.user_id != user_id and not recipe.is_public:
+        saved_result = await db.execute(
+            select(SavedRecipe).where(
+                SavedRecipe.user_id == user_id,
+                SavedRecipe.recipe_id == recipe.id,
+            )
+        )
+        if not saved_result.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="You don't have access to this recipe")
     
     # Check if already in collection
     existing_query = select(CollectionRecipe).where(

@@ -12,7 +12,9 @@ Display name is computed at extraction time from:
 """
 
 import asyncio
+
 from sqlalchemy import text
+
 from app.db.database import engine
 
 

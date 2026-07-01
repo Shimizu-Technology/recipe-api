@@ -8,8 +8,10 @@ across different short URLs for the same video.
 
 import asyncio
 import re
+
 import httpx
 from sqlalchemy import select
+
 from app.db.database import AsyncSessionLocal
 from app.models.recipe import Recipe
 
@@ -88,7 +90,7 @@ async def upgrade():
         
         await db.commit()
         
-        print(f"\nMigration complete:")
+        print("\nMigration complete:")
         print(f"   - Updated: {updated}")
         print(f"   - Skipped: {skipped}")
         print(f"   - Failed: {failed}")

@@ -38,6 +38,9 @@ OPENROUTER_API_KEY=sk-or-...
 
 # Clerk Auth (required)
 CLERK_FRONTEND_API=your-clerk-domain.clerk.accounts.dev
+CLERK_SECRET_KEY=sk_live_...              # required for server-side account deletion
+# CLERK_JWT_ISSUER=https://your-clerk-domain.clerk.accounts.dev
+# CLERK_JWT_AUDIENCE=hafa-recipes-api
 
 # AWS S3 - thumbnail storage (recommended)
 AWS_ACCESS_KEY_ID=AKIA...
@@ -56,6 +59,8 @@ SENTRY_DSN=https://xxx@xxx.ingest.sentry.io/xxx
 
 # Optional
 ENVIRONMENT=development
+# CORS_ORIGINS=https://hafa-recipes.com,https://www.hafa-recipes.com
+# ENABLE_SENTRY_DEBUG=false
 ```
 
 ## Error Monitoring (Sentry)
@@ -68,7 +73,7 @@ Sentry captures errors, performance data, and Instagram auth failures.
 3. Add `SENTRY_DSN` to Render environment variables for production
 
 ### Testing
-Visit `http://localhost:8000/sentry-debug` to trigger a test error.
+Visit `http://localhost:8000/sentry-debug` to trigger a test error in development. In non-development environments, set `ENABLE_SENTRY_DEBUG=true` temporarily before testing.
 
 ### What's Monitored
 - All unhandled exceptions
@@ -144,11 +149,11 @@ app/
 ### Extraction
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/extract/async` | Start extraction job (video URL) |
-| POST | `/api/extract/ocr` | Extract from single image (OCR) |
-| POST | `/api/extract/ocr/multi` | Extract from multiple images (OCR) |
+| POST | `/api/extract/async` | Start extraction job (authenticated) |
+| POST | `/api/extract/ocr` | Extract from single image (authenticated) |
+| POST | `/api/extract/ocr/multi` | Extract from multiple images (authenticated) |
 | POST | `/api/re-extract/{id}/async` | Re-extract with latest AI (owner/admin) |
-| GET | `/api/jobs/{id}` | Get job status |
+| GET | `/api/jobs/{id}` | Get job status (owner-scoped) |
 | GET | `/api/locations` | Available cost locations |
 
 ### Recipes
@@ -227,13 +232,14 @@ Admins can re-extract any recipe. Set via Clerk:
 
 ## Database Migrations
 
-```bash
-# Create migration
-alembic revision --autogenerate -m "description"
+This repo uses simple numbered migration scripts in `migrations/` rather than Alembic.
 
-# Run migrations
-alembic upgrade head
+```bash
+# Run a migration against the configured DATABASE_URL
+uv run python migrations/015_add_extraction_job_user_id.py
 ```
+
+Run migrations intentionally for each environment; do not run production migrations from a local shell unless you have confirmed the target database.
 
 ## Deployment (Render)
 

@@ -1,14 +1,19 @@
 """S3 storage service for persisting recipe thumbnails."""
 
-import httpx
-import boto3
-from botocore.exceptions import ClientError
-from typing import Optional
-from uuid import UUID
 import hashlib
-from io import BytesIO
+from typing import Optional
+from urllib.parse import urljoin
+from uuid import UUID
+
+import boto3
+import httpx
+from botocore.exceptions import ClientError
 
 from app.config import get_settings
+from app.security import PublicHTTPTransport
+
+MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024
+MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 class StorageService:
@@ -45,6 +50,42 @@ class StorageService:
         """Check if S3 storage is enabled."""
         return get_settings().s3_enabled
     
+    async def _download_public_url(self, image_url: str) -> tuple[bytes, str]:
+        """Download a public HTTP(S) URL, validating every redirect target."""
+        current_url = image_url
+
+        async with httpx.AsyncClient(timeout=30.0, transport=PublicHTTPTransport()) as client:
+            for _ in range(6):
+                async with client.stream("GET", current_url, follow_redirects=False) as response:
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ValueError("Redirect missing Location header")
+                        current_url = urljoin(current_url, location)
+                        continue
+
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "image/jpeg").split(";")[0]
+                    if not content_type.lower().startswith("image/"):
+                        raise ValueError("Thumbnail URL did not return an image")
+
+                    content_length = response.headers.get("content-length")
+                    if content_length and content_length.isdigit():
+                        if int(content_length) > MAX_THUMBNAIL_BYTES:
+                            raise ValueError("Thumbnail exceeds maximum size")
+
+                    chunks = []
+                    total_size = 0
+                    async for chunk in response.aiter_bytes():
+                        total_size += len(chunk)
+                        if total_size > MAX_THUMBNAIL_BYTES:
+                            raise ValueError("Thumbnail exceeds maximum size")
+                        chunks.append(chunk)
+
+                    return b"".join(chunks), content_type
+
+        raise ValueError("Too many redirects downloading thumbnail")
+
     async def upload_thumbnail_from_url(
         self, 
         image_url: str, 
@@ -70,12 +111,7 @@ class StorageService:
         try:
             # Download image from external URL
             print(f"📥 Downloading thumbnail from: {image_url[:60]}...")
-            
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                response = await client.get(image_url)
-                response.raise_for_status()
-                image_data = response.content
-                content_type = response.headers.get("content-type", "image/jpeg")
+            image_data, content_type = await self._download_public_url(image_url)
             
             # Determine file extension
             if "png" in content_type:
@@ -149,6 +185,44 @@ class StorageService:
             print(f"❌ Failed to delete thumbnail: {e}")
             return False
     
+    async def delete_prefix(self, prefix: str) -> int:
+        """Delete all S3 objects under a prefix and return deleted count."""
+        if not self.is_enabled:
+            return 0
+
+        deleted_count = 0
+        continuation_token = None
+
+        try:
+            while True:
+                kwargs = {"Bucket": self.bucket_name, "Prefix": prefix}
+                if continuation_token:
+                    kwargs["ContinuationToken"] = continuation_token
+
+                response = self.client.list_objects_v2(**kwargs)
+                objects = response.get("Contents", [])
+                if objects:
+                    delete_response = self.client.delete_objects(
+                        Bucket=self.bucket_name,
+                        Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
+                    )
+                    errors = delete_response.get("Errors", [])
+                    if errors:
+                        print(
+                            f"⚠️ Failed to delete {len(errors)} objects under S3 prefix {prefix}: "
+                            f"{errors[:3]}"
+                        )
+                    deleted_count += len(delete_response.get("Deleted", []))
+
+                if not response.get("IsTruncated"):
+                    break
+                continuation_token = response.get("NextContinuationToken")
+
+            return deleted_count
+        except Exception as e:
+            print(f"❌ Failed to delete S3 prefix {prefix}: {e}")
+            return deleted_count
+
     def get_thumbnail_url(self, recipe_id: str | UUID, extension: str = "jpg") -> str:
         """
         Get the S3 URL for a recipe's thumbnail.
@@ -224,7 +298,6 @@ class StorageService:
             print(f"❌ Unexpected error uploading thumbnail: {e}")
             return None
 
-
     async def upload_chat_image(
         self,
         image_base64: str,
@@ -254,10 +327,13 @@ class StorageService:
             import base64
             
             # Decode base64 to bytes
-            image_data = base64.b64decode(image_base64)
+            image_data = base64.b64decode(image_base64, validate=True)
+            if len(image_data) > MAX_CHAT_IMAGE_BYTES:
+                print("⚠️ Chat image too large, skipping upload")
+                return None
             
             # Generate a hash-based filename for deduplication
-            image_hash = hashlib.md5(image_data).hexdigest()[:12]
+            image_hash = hashlib.sha256(image_data).hexdigest()[:12]
             
             # Determine content type from base64 prefix
             content_type = "image/jpeg"

@@ -1,9 +1,17 @@
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
     
     # Database
     database_url: str
@@ -17,6 +25,8 @@ class Settings(BaseSettings):
     # Clerk Auth
     clerk_secret_key: str | None = None
     clerk_frontend_api: str = "clerk.your-domain.com"  # e.g., "prepared-mole-42.clerk.accounts.dev"
+    clerk_jwt_issuer: str | None = None
+    clerk_jwt_audience: str | None = None
     
     # AWS S3 (for thumbnail storage)
     aws_access_key_id: str | None = None
@@ -41,6 +51,8 @@ class Settings(BaseSettings):
     
     # Environment
     environment: str = "development"
+    cors_origins: str = ""
+    enable_sentry_debug: bool = False
     
     # API Settings
     api_title: str = "Recipe Extractor API"
@@ -54,11 +66,35 @@ class Settings(BaseSettings):
             self.aws_secret_access_key,
             self.s3_bucket_name
         ])
-    
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"
+
+    @property
+    def clerk_issuer(self) -> str:
+        """Expected Clerk JWT issuer."""
+        if self.clerk_jwt_issuer:
+            return self.clerk_jwt_issuer.rstrip("/")
+        frontend_api = self.clerk_frontend_api.rstrip("/")
+        if frontend_api.startswith("http://") or frontend_api.startswith("https://"):
+            return frontend_api
+        return f"https://{frontend_api}"
+
+    @property
+    def jwks_url(self) -> str:
+        """Clerk JWKS endpoint."""
+        return f"{self.clerk_issuer}/.well-known/jwks.json"
+
+    @property
+    def allowed_cors_origins(self) -> list[str]:
+        """Allowed browser origins for CORS."""
+        if self.cors_origins:
+            return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+        if self.environment.lower() == "development":
+            return ["*"]
+
+        return [
+            "https://hafa-recipes.com",
+            "https://www.hafa-recipes.com",
+        ]
     
     @property
     def async_database_url(self) -> str:
@@ -69,12 +105,15 @@ class Settings(BaseSettings):
             url = url.replace("postgres://", "postgresql+asyncpg://", 1)
         elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        # Remove sslmode parameter (handled separately by asyncpg)
-        if "?sslmode=" in url:
-            url = url.split("?sslmode=")[0]
-        elif "&sslmode=" in url:
-            url = url.replace("&sslmode=require", "").replace("&sslmode=prefer", "")
-        return url
+        # Remove sslmode parameter (handled separately by asyncpg) while preserving
+        # any other connection parameters in the URL.
+        parts = urlsplit(url)
+        query_params = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key.lower() != "sslmode"
+        ]
+        return urlunsplit(parts._replace(query=urlencode(query_params)))
 
 
 @lru_cache
