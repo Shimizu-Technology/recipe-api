@@ -28,3 +28,22 @@ def test_async_database_url_removes_sslmode_when_it_is_not_first_param():
         settings.async_database_url
         == "postgresql+asyncpg://user:pass@example.com/db?application_name=hafa"
     )
+
+
+def test_async_database_url_removes_channel_binding_for_asyncpg():
+    settings = _settings(
+        "postgresql://user:pass@example.com/db?sslmode=require&channel_binding=require"
+    )
+
+    assert settings.async_database_url == "postgresql+asyncpg://user:pass@example.com/db"
+
+
+def test_async_database_url_removes_channel_binding_and_preserves_supported_params():
+    settings = _settings(
+        "postgresql://user:pass@example.com/db?channel_binding=require&application_name=hafa"
+    )
+
+    assert (
+        settings.async_database_url
+        == "postgresql+asyncpg://user:pass@example.com/db?application_name=hafa"
+    )

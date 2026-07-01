@@ -105,13 +105,14 @@ class Settings(BaseSettings):
             url = url.replace("postgres://", "postgresql+asyncpg://", 1)
         elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        # Remove sslmode parameter (handled separately by asyncpg) while preserving
-        # any other connection parameters in the URL.
+        # Remove libpq/psycopg SSL parameters that asyncpg does not accept as
+        # keyword arguments. SSL is configured explicitly in app.db.database.
         parts = urlsplit(url)
+        unsupported_asyncpg_params = {"sslmode", "channel_binding"}
         query_params = [
             (key, value)
             for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if key.lower() != "sslmode"
+            if key.lower() not in unsupported_asyncpg_params
         ]
         return urlunsplit(parts._replace(query=urlencode(query_params)))
 
