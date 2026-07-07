@@ -84,6 +84,22 @@ async def import_csv(csv_path: Path, dry_run: bool = False) -> int:
 
     async with engine.begin() as conn:
         for row in rows:
+            existing_result = await conn.execute(
+                text("""
+                    SELECT legacy_user_id
+                    FROM legacy_clerk_user_mappings
+                    WHERE email_hash = :email_hash
+                """),
+                {"email_hash": row["email_hash"]},
+            )
+            existing_legacy_user_id = existing_result.scalar_one_or_none()
+            if existing_legacy_user_id and existing_legacy_user_id != row["legacy_user_id"]:
+                raise ValueError(
+                    "Email hash already belongs to a different legacy user mapping: "
+                    f"{existing_legacy_user_id}. Refusing to overwrite with {row['legacy_user_id']}."
+                )
+
+        for row in rows:
             await conn.execute(
                 text("""
                     INSERT INTO legacy_clerk_user_mappings (legacy_user_id, email_hash, updated_at)
