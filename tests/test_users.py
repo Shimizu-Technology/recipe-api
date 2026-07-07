@@ -1,6 +1,8 @@
+import importlib
+
 import pytest
 
-import app.routers.users as users
+from app.config import get_settings
 
 
 class _FakeSettings:
@@ -32,14 +34,22 @@ class _FakeAsyncClient:
         return _FakeResponse(self.payload)
 
 
-def _patch_clerk_response(monkeypatch, payload):
+def _load_users_with_clerk_response(monkeypatch, payload):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@example.com/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    get_settings.cache_clear()
+
+    import app.routers.users as users
+
+    users = importlib.reload(users)
     monkeypatch.setattr(users, "settings", _FakeSettings())
     monkeypatch.setattr(users.httpx, "AsyncClient", lambda timeout: _FakeAsyncClient(payload))
+    return users
 
 
 @pytest.mark.asyncio
 async def test_fetch_clerk_primary_email_requires_verified_status(monkeypatch):
-    _patch_clerk_response(monkeypatch, {
+    users = _load_users_with_clerk_response(monkeypatch, {
         "primary_email_address_id": "email_1",
         "email_addresses": [
             {
@@ -55,7 +65,7 @@ async def test_fetch_clerk_primary_email_requires_verified_status(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_clerk_primary_email_returns_verified_email(monkeypatch):
-    _patch_clerk_response(monkeypatch, {
+    users = _load_users_with_clerk_response(monkeypatch, {
         "primary_email_address_id": "email_1",
         "email_addresses": [
             {
