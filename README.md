@@ -235,11 +235,24 @@ Admins can re-extract any recipe. Set via Clerk:
 This repo uses simple numbered migration scripts in `migrations/` rather than Alembic.
 
 ```bash
-# Run a migration against the configured DATABASE_URL
+# Local/dev with uv
 uv run python migrations/015_add_extraction_job_user_id.py
+uv run python migrations/016_add_clerk_user_migration_tables.py
+
+# Render shell/one-off job, using the service's installed environment
+PYTHONPATH=. python migrations/015_add_extraction_job_user_id.py
+PYTHONPATH=. python migrations/016_add_clerk_user_migration_tables.py
 ```
 
 Run migrations intentionally for each environment; do not run production migrations from a local shell unless you have confirmed the target database.
+
+Current production-required migration:
+
+- `migrations/015_add_extraction_job_user_id.py` — required by `/api/extract/async` because extraction jobs are now user-owned.
+- `migrations/016_add_clerk_user_migration_tables.py` — required before the Clerk production cutover migration bridge can import/link legacy users.
+
+See `docs/PRODUCTION_EXTRACTION_MIGRATION_015_RUNBOOK.md` for the production extraction failure/runbook.
+See `docs/CLERK_PROD_CUTOVER_RUNBOOK.md` for the Clerk production cutover runbook.
 
 ## Deployment (Render)
 

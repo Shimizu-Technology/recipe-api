@@ -28,6 +28,7 @@ class ClerkUser(BaseModel):
     last_name: Optional[str] = None
     image_url: Optional[str] = None
     role: Optional[str] = None  # From public_metadata (e.g., "admin")
+    issuer: Optional[str] = None
     
     @property
     def is_admin(self) -> bool:
@@ -56,16 +57,50 @@ class ClerkUser(BaseModel):
             return "A chef"
 
 
-# Cache the JWKS client to avoid repeated fetches
-_jwks_client: Optional[PyJWKClient] = None
+# Cache JWKS clients by issuer to avoid repeated fetches.
+_jwks_clients: dict[str, PyJWKClient] = {}
 
 
-def get_jwks_client() -> PyJWKClient:
-    """Get or create JWKS client for Clerk."""
-    global _jwks_client
-    if _jwks_client is None:
-        _jwks_client = PyJWKClient(settings.jwks_url)
-    return _jwks_client
+def get_jwks_client(issuer: Optional[str] = None) -> PyJWKClient:
+    """Get or create a JWKS client for a Clerk issuer."""
+    selected_issuer = (issuer or settings.clerk_issuer).rstrip("/")
+    if selected_issuer not in _jwks_clients:
+        _jwks_clients[selected_issuer] = PyJWKClient(settings.jwks_url_for_issuer(selected_issuer))
+    return _jwks_clients[selected_issuer]
+
+
+def get_token_issuer_unverified(token: str) -> str:
+    """Read a JWT issuer before signature verification.
+
+    The issuer is only used to choose the correct Clerk JWKS endpoint from the
+    configured allowlist. Signature, issuer, expiration, and optional audience
+    are still verified afterwards by PyJWT.
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            options={
+                "verify_signature": False,
+                "verify_exp": False,
+                "verify_aud": False,
+                "verify_iss": False,
+            },
+        )
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    issuer = payload.get("iss")
+    if not issuer:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token: missing issuer",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return issuer.rstrip("/")
 
 
 def verify_clerk_token(token: str) -> ClerkUser:
@@ -75,16 +110,25 @@ def verify_clerk_token(token: str) -> ClerkUser:
     Raises HTTPException if token is invalid.
     """
     try:
-        # Get the signing key from Clerk's JWKS
-        jwks_client = get_jwks_client()
+        issuer = get_token_issuer_unverified(token)
+        allowed_issuers = settings.clerk_issuers
+        if issuer not in allowed_issuers:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token issuer",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Get the signing key from the selected Clerk issuer's JWKS.
+        jwks_client = get_jwks_client(issuer)
         signing_key = jwks_client.get_signing_key_from_jwt(token)
         
-        # Decode and verify the token
-        # Add 60 second leeway to handle clock skew between client and server
+        # Decode and verify the token.
+        # Add 60 second leeway to handle clock skew between client and server.
         decode_kwargs = {
             "key": signing_key.key,
             "algorithms": ["RS256"],
-            "issuer": settings.clerk_issuer,
+            "issuer": issuer,
             "leeway": 60,  # 60 seconds tolerance for clock differences
             "options": {"verify_aud": bool(settings.clerk_jwt_audience)},
         }
@@ -104,8 +148,11 @@ def verify_clerk_token(token: str) -> ClerkUser:
             last_name=payload.get("last_name"),
             image_url=payload.get("image_url"),
             role=public_metadata.get("role"),
+            issuer=issuer,
         )
         
+    except HTTPException:
+        raise
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

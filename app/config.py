@@ -28,7 +28,9 @@ class Settings(BaseSettings):
     clerk_secret_key: str | None = None
     clerk_frontend_api: str = "clerk.your-domain.com"  # e.g., "prepared-mole-42.clerk.accounts.dev"
     clerk_jwt_issuer: str | None = None
+    clerk_jwt_issuers: str | None = None
     clerk_jwt_audience: str | None = None
+    clerk_migration_email_hash_secret: str | None = None
     
     # AWS S3 (for thumbnail storage)
     aws_access_key_id: str | None = None
@@ -80,9 +82,29 @@ class Settings(BaseSettings):
         return f"https://{frontend_api}"
 
     @property
+    def clerk_issuers(self) -> list[str]:
+        """Allowed Clerk JWT issuers.
+
+        During the Clerk production cutover, production temporarily accepts both
+        the old Clerk development issuer and the new Clerk production issuer so
+        existing App Store builds keep working while the new build rolls out.
+        """
+        if self.clerk_jwt_issuers:
+            return [
+                issuer.strip().rstrip("/")
+                for issuer in self.clerk_jwt_issuers.split(",")
+                if issuer.strip()
+            ]
+        return [self.clerk_issuer]
+
+    @property
     def jwks_url(self) -> str:
-        """Clerk JWKS endpoint."""
+        """Primary Clerk JWKS endpoint."""
         return f"{self.clerk_issuer}/.well-known/jwks.json"
+
+    def jwks_url_for_issuer(self, issuer: str) -> str:
+        """Clerk JWKS endpoint for a specific issuer."""
+        return f"{issuer.rstrip('/')}/.well-known/jwks.json"
 
     @property
     def allowed_cors_origins(self) -> list[str]:
