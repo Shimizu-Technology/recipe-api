@@ -219,10 +219,12 @@ async def migrate_legacy_user_data(
         result = await db.execute(text(statement), params)
         rows_updated[key] = result.rowcount or 0
 
-    await db.execute(
+    insert_result = await db.execute(
         text("""
             INSERT INTO clerk_user_migrations (legacy_user_id, new_user_id, email_hash)
             VALUES (:legacy_user_id, :new_user_id, :email_hash)
+            ON CONFLICT DO NOTHING
+            RETURNING legacy_user_id
         """),
         {
             "legacy_user_id": legacy_user_id,
@@ -230,6 +232,16 @@ async def migrate_legacy_user_data(
             "email_hash": email_hash,
         },
     )
+    inserted_legacy_user_id = insert_result.scalar_one_or_none()
+    if not inserted_legacy_user_id:
+        return LegacyMigrationResult(
+            status="conflict",
+            migrated=False,
+            legacy_user_id=legacy_user_id,
+            new_user_id=new_user_id,
+            rows_updated=rows_updated,
+            reason="Migration record could not be inserted because another migration completed first",
+        )
 
     return LegacyMigrationResult(
         status="migrated",
