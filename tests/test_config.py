@@ -79,3 +79,29 @@ def test_jwks_url_for_issuer_strips_trailing_slash():
         settings.jwks_url_for_issuer("https://example.clerk.accounts.dev/")
         == "https://example.clerk.accounts.dev/.well-known/jwks.json"
     )
+
+
+def test_clerk_secret_key_for_issuer_uses_specific_mapping_first():
+    settings = Settings(
+        database_url="postgresql://user:pass@example.com/db",
+        openai_api_key="test-openai-key",
+        clerk_secret_key="fallback-secret",
+        clerk_secret_keys_by_issuer=(
+            "https://old.clerk.accounts.dev=old-secret,"
+            "https://new.clerk.accounts.dev/=new-secret"
+        ),
+    )
+
+    assert settings.clerk_secret_key_for_issuer("https://old.clerk.accounts.dev") == "old-secret"
+    assert settings.clerk_secret_key_for_issuer("https://new.clerk.accounts.dev") == "new-secret"
+    assert settings.clerk_secret_key_for_issuer("https://other.clerk.accounts.dev") == "fallback-secret"
+
+
+def test_clerk_secret_key_for_issuer_falls_back_to_default():
+    settings = Settings(
+        database_url="postgresql://user:pass@example.com/db",
+        openai_api_key="test-openai-key",
+        clerk_secret_key="fallback-secret",
+    )
+
+    assert settings.clerk_secret_key_for_issuer("https://old.clerk.accounts.dev") == "fallback-secret"

@@ -27,15 +27,16 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 settings = get_settings()
 
 
-async def _fetch_clerk_primary_email(user_id: str) -> str | None:
+async def _fetch_clerk_primary_email(user_id: str, issuer: str | None = None) -> str | None:
     """Fetch a verified primary email from Clerk when it is missing from the JWT."""
-    if not settings.clerk_secret_key:
+    clerk_secret_key = settings.clerk_secret_key_for_issuer(issuer)
+    if not clerk_secret_key:
         return None
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(
             f"https://api.clerk.com/v1/users/{user_id}",
-            headers={"Authorization": f"Bearer {settings.clerk_secret_key}"},
+            headers={"Authorization": f"Bearer {clerk_secret_key}"},
         )
         if response.status_code == 404:
             return None
@@ -58,15 +59,16 @@ async def _fetch_clerk_primary_email(user_id: str) -> str | None:
     return None
 
 
-async def _delete_clerk_user(user_id: str) -> bool:
+async def _delete_clerk_user(user_id: str, issuer: str | None = None) -> bool:
     """Delete the Clerk user when a secret key is configured."""
-    if not settings.clerk_secret_key:
+    clerk_secret_key = settings.clerk_secret_key_for_issuer(issuer)
+    if not clerk_secret_key:
         return False
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.delete(
             f"https://api.clerk.com/v1/users/{user_id}",
-            headers={"Authorization": f"Bearer {settings.clerk_secret_key}"},
+            headers={"Authorization": f"Bearer {clerk_secret_key}"},
         )
         if response.status_code not in {200, 204, 404}:
             raise RuntimeError(f"Clerk deletion failed with status {response.status_code}")
@@ -85,7 +87,7 @@ async def migrate_legacy_account(
     configured, no mapping exists, or the user has already been migrated.
     """
     try:
-        email = user.email or await _fetch_clerk_primary_email(user.id)
+        email = user.email or await _fetch_clerk_primary_email(user.id, user.issuer)
         result = await migrate_legacy_user_data(
             db,
             new_user_id=user.id,
@@ -189,7 +191,7 @@ async def delete_account(
 
     clerk_deleted = False
     try:
-        clerk_deleted = await _delete_clerk_user(user_id)
+        clerk_deleted = await _delete_clerk_user(user_id, user.issuer)
     except Exception as e:
         sentry_sdk.capture_exception(e)
         print(f"⚠️ Local account data deleted, but Clerk deletion failed for {user_id}: {e}")

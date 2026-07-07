@@ -121,7 +121,10 @@ Suggested env shape:
 CLERK_JWT_ISSUERS=https://old-dev-issuer.clerk.accounts.dev,https://new-prod-issuer.clerk.accounts.dev
 CLERK_JWT_ISSUER=https://new-prod-issuer.clerk.accounts.dev
 CLERK_SECRET_KEY=sk_live_...
+CLERK_SECRET_KEYS_BY_ISSUER=https://old-dev-issuer.clerk.accounts.dev=sk_test_...,https://new-prod-issuer.clerk.accounts.dev=sk_live_...
 ```
+
+`CLERK_SECRET_KEYS_BY_ISSUER` lets account deletion and email fallback call the matching Clerk instance for the token issuer during the transition. `CLERK_SECRET_KEY` remains the fallback/default.
 
 Do not remove old issuer support until enough users have updated to the production-Clerk mobile build.
 
@@ -267,5 +270,6 @@ After mobile `2.3.1` is live:
 - [ ] Email/password, Apple, and Google are configured in production Clerk.
 - [ ] JWT template `recipe-extractor-public-metadata` exists in production Clerk.
 - [ ] Production API env values are ready but not exposed in git/chat.
+- [ ] `CLERK_SECRET_KEYS_BY_ISSUER` includes both old dev and new prod Clerk issuers during the transition.
 - [ ] EAS production env is ready but not exposed in git/chat.
 - [ ] Decide transition window length for old Clerk issuer support.
