@@ -43,18 +43,18 @@ async def _fetch_clerk_primary_email(user_id: str, issuer: str | None = None) ->
         if response.status_code != 200:
             raise RuntimeError(f"Clerk user fetch failed with status {response.status_code}")
 
-    data = response.json()
-    primary_email_id = data.get("primary_email_address_id")
-    for email_address in data.get("email_addresses", []):
-        if email_address.get("id") != primary_email_id:
-            continue
+        data = response.json()
+        primary_email_id = data.get("primary_email_address_id")
+        for email_address in data.get("email_addresses", []):
+            if email_address.get("id") != primary_email_id:
+                continue
 
-        verification = email_address.get("verification") or {}
-        if verification.get("status") not in {None, "verified"}:
-            return None
+            verification = email_address.get("verification") or {}
+            if verification.get("status") != "verified":
+                return None
 
-        email = email_address.get("email_address")
-        return email.strip() if isinstance(email, str) and email.strip() else None
+            email = email_address.get("email_address")
+            return email.strip() if isinstance(email, str) and email.strip() else None
 
     return None
 

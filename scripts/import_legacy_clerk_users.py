@@ -45,6 +45,9 @@ async def import_csv(csv_path: Path, dry_run: bool = False) -> int:
         raise FileNotFoundError(csv_path)
 
     rows: list[dict[str, str]] = []
+    seen_legacy_user_ids: set[str] = set()
+    seen_email_hashes: dict[str, str] = {}
+
     with csv_path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         required = {"legacy_user_id", "email"}
@@ -57,9 +60,22 @@ async def import_csv(csv_path: Path, dry_run: bool = False) -> int:
             if not legacy_user_id or not email:
                 raise ValueError(f"Missing legacy_user_id/email on CSV line {line_number}")
 
+            if legacy_user_id in seen_legacy_user_ids:
+                raise ValueError(f"Duplicate legacy_user_id on CSV line {line_number}: {legacy_user_id}")
+            seen_legacy_user_ids.add(legacy_user_id)
+
+            email_hash = hash_email(email, secret)
+            existing_legacy_user_id = seen_email_hashes.get(email_hash)
+            if existing_legacy_user_id and existing_legacy_user_id != legacy_user_id:
+                raise ValueError(
+                    "Duplicate email mapping in CSV for legacy users "
+                    f"{existing_legacy_user_id} and {legacy_user_id}"
+                )
+            seen_email_hashes[email_hash] = legacy_user_id
+
             rows.append({
                 "legacy_user_id": legacy_user_id,
-                "email_hash": hash_email(email, secret),
+                "email_hash": email_hash,
             })
 
     if dry_run:
