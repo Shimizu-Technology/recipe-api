@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import ClerkUser, get_current_user, get_optional_user
 from app.db import get_db
+from app.image_validation import ImageValidationError, ValidatedImage, validate_image_bytes
 from app.models.recipe import (
     CollectionRecipe,
     ExtractionJob,
@@ -27,6 +28,8 @@ from app.models.schemas import (
 )
 from app.public_identity import public_contributor_id, visible_recipe_user_id
 from app.services.storage import storage_service
+
+MAX_RECIPE_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
 def normalize_recipe_data(recipe: Recipe) -> Recipe:
@@ -466,6 +469,17 @@ async def create_manual_recipe(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid recipe data: {e}")
 
+    validated_upload: ValidatedImage | None = None
+    if image and image.filename:
+        try:
+            validated_upload = validate_image_bytes(
+                await image.read(),
+                max_bytes=MAX_RECIPE_UPLOAD_BYTES,
+                declared_content_type=image.content_type,
+            )
+        except ImageValidationError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
     # Build the extracted JSONB structure to match extracted recipes
     ingredients_list = [
         {
@@ -548,26 +562,18 @@ async def create_manual_recipe(
     await db.refresh(new_recipe)
 
     # Upload image if provided
-    if image and image.filename:
-        try:
-            image_data = await image.read()
-            content_type = image.content_type or "image/jpeg"
+    if validated_upload:
+        s3_url = await storage_service.upload_thumbnail_from_bytes(
+            validated_upload.data,
+            str(new_recipe.id),
+            validated_upload.content_type,
+        )
 
-            s3_url = await storage_service.upload_thumbnail_from_bytes(
-                image_data,
-                str(new_recipe.id),
-                content_type
-            )
-
-            if s3_url:
-                new_recipe.thumbnail_url = s3_url
-                # Update the media field in extracted JSON
-                new_recipe.extracted["media"]["thumbnail"] = s3_url
-                await db.commit()
-                await db.refresh(new_recipe)
-        except Exception as e:
-            print(f"⚠️ Failed to upload image: {e}")
-            # Recipe is still created, just without an image
+        if s3_url:
+            new_recipe.thumbnail_url = s3_url
+            new_recipe.extracted["media"]["thumbnail"] = s3_url
+            await db.commit()
+            await db.refresh(new_recipe)
 
     return recipe_to_detail_response(new_recipe, user.id)
 
@@ -1765,13 +1771,21 @@ async def edit_recipe_with_image(
     thumbnail_url = recipe.thumbnail_url
     if image:
         try:
-            image_bytes = await image.read()
-            thumbnail_url = await storage_service.upload_thumbnail_from_bytes(
-                image_bytes, str(recipe_id)
+            validated_upload = validate_image_bytes(
+                await image.read(),
+                max_bytes=MAX_RECIPE_UPLOAD_BYTES,
+                declared_content_type=image.content_type,
             )
-        except Exception as e:
-            print(f"Failed to upload image: {e}")
-            # Continue without updating the image
+        except ImageValidationError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+        uploaded_url = await storage_service.upload_thumbnail_from_bytes(
+            validated_upload.data,
+            str(recipe_id),
+            validated_upload.content_type,
+        )
+        if uploaded_url:
+            thumbnail_url = uploaded_url
 
     # Build the new extracted structure FIRST (for change comparison)
     ingredients_list = [

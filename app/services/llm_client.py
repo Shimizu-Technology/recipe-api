@@ -1,4 +1,4 @@
-"""LLM service for recipe extraction with Gemini (primary) and GPT fallback."""
+"""LLM service for recipe extraction with pinned Luna/Terra routing."""
 
 import asyncio
 import json
@@ -33,48 +33,47 @@ class LLMService:
     """
     Service for LLM-based recipe extraction.
     
-    Primary: Gemini 2.0 Flash via OpenRouter (fast, cheap)
-    Fallback: GPT-4o-mini via OpenAI (reliable)
+    Primary: GPT-5.6 Luna for routine structured extraction.
+    Fallback: GPT-5.6 Terra after a failed or schema-invalid result.
     """
     
     SYSTEM_PROMPT = "You are a culinary extraction engine. Extract recipe information and return valid JSON only."
     
     # Model configurations
-    GEMINI_CONFIG = {
-        "name": "Gemini 2.0 Flash",
-        "model": "google/gemini-2.0-flash-001",
-        "base_url": "https://openrouter.ai/api/v1",
+    PRIMARY_CONFIG = {
+        "name": settings.recipe_extraction_model,
+        "model": settings.recipe_extraction_model,
+        "base_url": "https://api.openai.com/v1",
         "timeout": 60,
         "max_retries": 2,
     }
     
-    GPT_CONFIG = {
-        "name": "GPT-4o-mini",
-        "model": "gpt-4o-mini",
+    FALLBACK_CONFIG = {
+        "name": settings.recipe_extraction_fallback_model,
+        "model": settings.recipe_extraction_fallback_model,
         "base_url": "https://api.openai.com/v1",
         "timeout": 120,
         "max_retries": 1,
     }
     
     # Vision model configurations for OCR
-    GEMINI_VISION_CONFIG = {
-        "name": "Gemini 2.0 Flash (Vision)",
-        "model": "google/gemini-2.0-flash-001",
-        "base_url": "https://openrouter.ai/api/v1",
+    PRIMARY_VISION_CONFIG = {
+        "name": settings.ocr_model,
+        "model": settings.ocr_model,
+        "base_url": "https://api.openai.com/v1",
         "timeout": 90,
         "max_retries": 2,
     }
     
-    GPT_VISION_CONFIG = {
-        "name": "GPT-4o (Vision)",
-        "model": "gpt-4o",
+    FALLBACK_VISION_CONFIG = {
+        "name": settings.ocr_fallback_model,
+        "model": settings.ocr_fallback_model,
         "base_url": "https://api.openai.com/v1",
         "timeout": 120,
         "max_retries": 1,
     }
     
     def __init__(self):
-        self.openrouter_api_key = settings.openrouter_api_key
         self.openai_api_key = settings.openai_api_key
         
     async def extract_recipe(
@@ -87,13 +86,13 @@ class LLMService:
         """
         Extract structured recipe data using LLM.
         
-        Tries Gemini first (faster, cheaper), falls back to GPT if needed.
+        Tries Luna first and falls back to Terra after a failed result.
         
         Args:
             source_url: Original video URL
             content: Combined text content (title + description + transcript)
             location: Location for cost estimation
-            use_fallback: Whether to fall back to GPT if Gemini fails
+            use_fallback: Whether to use the configured Terra fallback
             
         Returns:
             ExtractionResult with recipe dict or error
@@ -108,39 +107,40 @@ class LLMService:
         # Generate prompt
         prompt = get_recipe_extraction_prompt(source_url, sanitized_content, location)
         
-        # Try Gemini first (if API key available)
-        if self.openrouter_api_key:
-            print(f"🚀 Trying {self.GEMINI_CONFIG['name']}...")
+        if not settings.is_ai_capability_enabled("recipe_extraction"):
+            return ExtractionResult(success=False, error="Recipe extraction is temporarily unavailable")
+
+        # Try the low-cost primary first.
+        if self.openai_api_key:
+            print(f"🚀 Trying {self.PRIMARY_CONFIG['name']}...")
             result = await self._try_extraction(
-                config=self.GEMINI_CONFIG,
-                api_key=self.openrouter_api_key,
-                prompt=prompt,
-                source_url=source_url,
-                location=location,
-                is_openrouter=True
-            )
-            
-            if result.success:
-                return result
-            else:
-                print(f"⚠️ {self.GEMINI_CONFIG['name']} failed: {result.error}")
-        
-        # Fall back to GPT
-        if use_fallback and self.openai_api_key:
-            print(f"🔄 Falling back to {self.GPT_CONFIG['name']}...")
-            result = await self._try_extraction(
-                config=self.GPT_CONFIG,
+                config=self.PRIMARY_CONFIG,
                 api_key=self.openai_api_key,
                 prompt=prompt,
                 source_url=source_url,
                 location=location,
-                is_openrouter=False
             )
             
             if result.success:
                 return result
             else:
-                print(f"❌ {self.GPT_CONFIG['name']} also failed: {result.error}")
+                print(f"⚠️ {self.PRIMARY_CONFIG['name']} failed: {result.error}")
+        
+        # Fall back to GPT
+        if use_fallback and self.openai_api_key:
+            print(f"🔄 Falling back to {self.FALLBACK_CONFIG['name']}...")
+            result = await self._try_extraction(
+                config=self.FALLBACK_CONFIG,
+                api_key=self.openai_api_key,
+                prompt=prompt,
+                source_url=source_url,
+                location=location,
+            )
+            
+            if result.success:
+                return result
+            else:
+                print(f"❌ {self.FALLBACK_CONFIG['name']} also failed: {result.error}")
         
         # Both failed
         return ExtractionResult(
@@ -157,12 +157,12 @@ class LLMService:
         """
         Extract recipe from an image (OCR) using vision models.
         
-        Tries Gemini Vision first (faster, cheaper), falls back to GPT-4o Vision if needed.
+        Tries Luna vision first and falls back to Terra after a failed result.
         
         Args:
             image_base64: Base64 encoded image data
             location: Location for cost estimation
-            use_fallback: Whether to fall back to GPT-4o if Gemini fails
+            use_fallback: Whether to use the configured Terra fallback
             
         Returns:
             ExtractionResult with recipe dict or error
@@ -174,39 +174,38 @@ class LLMService:
         # Generate OCR prompt
         prompt = get_ocr_extraction_prompt(location)
         
-        # Try Gemini Vision first (if API key available)
-        if self.openrouter_api_key:
-            print(f"🚀 Trying {self.GEMINI_VISION_CONFIG['name']}...")
+        if not settings.is_ai_capability_enabled("ocr"):
+            return ExtractionResult(success=False, error="OCR is temporarily unavailable")
+
+        if self.openai_api_key:
+            print(f"🚀 Trying {self.PRIMARY_VISION_CONFIG['name']}...")
             result = await self._try_vision_extraction(
-                config=self.GEMINI_VISION_CONFIG,
-                api_key=self.openrouter_api_key,
-                prompt=prompt,
-                image_base64=image_base64,
-                location=location,
-                is_openrouter=True
-            )
-            
-            if result.success:
-                return result
-            else:
-                print(f"⚠️ {self.GEMINI_VISION_CONFIG['name']} failed: {result.error}")
-        
-        # Fall back to GPT-4o Vision
-        if use_fallback and self.openai_api_key:
-            print(f"🔄 Falling back to {self.GPT_VISION_CONFIG['name']}...")
-            result = await self._try_vision_extraction(
-                config=self.GPT_VISION_CONFIG,
+                config=self.PRIMARY_VISION_CONFIG,
                 api_key=self.openai_api_key,
                 prompt=prompt,
                 image_base64=image_base64,
                 location=location,
-                is_openrouter=False
             )
             
             if result.success:
                 return result
             else:
-                print(f"❌ {self.GPT_VISION_CONFIG['name']} also failed: {result.error}")
+                print(f"⚠️ {self.PRIMARY_VISION_CONFIG['name']} failed: {result.error}")
+        
+        if use_fallback and self.openai_api_key:
+            print(f"🔄 Falling back to {self.FALLBACK_VISION_CONFIG['name']}...")
+            result = await self._try_vision_extraction(
+                config=self.FALLBACK_VISION_CONFIG,
+                api_key=self.openai_api_key,
+                prompt=prompt,
+                image_base64=image_base64,
+                location=location,
+            )
+            
+            if result.success:
+                return result
+            else:
+                print(f"❌ {self.FALLBACK_VISION_CONFIG['name']} also failed: {result.error}")
         
         # Both failed
         return ExtractionResult(
@@ -229,7 +228,7 @@ class LLMService:
         Args:
             images_base64: List of base64 encoded slideshow images
             location: Location for cost estimation
-            use_fallback: Whether to fall back to GPT-4o if Gemini fails
+            use_fallback: Whether to use the configured Terra fallback
             
         Returns:
             ExtractionResult with recipe dict or error
@@ -243,39 +242,38 @@ class LLMService:
         # Use TikTok slideshow-specific prompt (visual analysis)
         prompt = get_tiktok_slideshow_prompt(num_images, location)
         
-        # Try Gemini Vision first (if API key available)
-        if self.openrouter_api_key:
-            print(f"🚀 Trying {self.GEMINI_VISION_CONFIG['name']} with {num_images} slideshow images...")
+        if not settings.is_ai_capability_enabled("ocr"):
+            return ExtractionResult(success=False, error="OCR is temporarily unavailable")
+
+        if self.openai_api_key:
+            print(f"🚀 Trying {self.PRIMARY_VISION_CONFIG['name']} with {num_images} slideshow images...")
             result = await self._try_multi_image_extraction(
-                config=self.GEMINI_VISION_CONFIG,
-                api_key=self.openrouter_api_key,
-                prompt=prompt,
-                images_base64=images_base64,
-                location=location,
-                is_openrouter=True
-            )
-            
-            if result.success:
-                return result
-            else:
-                print(f"⚠️ {self.GEMINI_VISION_CONFIG['name']} failed: {result.error}")
-        
-        # Fall back to GPT-4o Vision
-        if use_fallback and self.openai_api_key:
-            print(f"🔄 Falling back to {self.GPT_VISION_CONFIG['name']}...")
-            result = await self._try_multi_image_extraction(
-                config=self.GPT_VISION_CONFIG,
+                config=self.PRIMARY_VISION_CONFIG,
                 api_key=self.openai_api_key,
                 prompt=prompt,
                 images_base64=images_base64,
                 location=location,
-                is_openrouter=False
             )
             
             if result.success:
                 return result
             else:
-                print(f"❌ {self.GPT_VISION_CONFIG['name']} also failed: {result.error}")
+                print(f"⚠️ {self.PRIMARY_VISION_CONFIG['name']} failed: {result.error}")
+        
+        if use_fallback and self.openai_api_key:
+            print(f"🔄 Falling back to {self.FALLBACK_VISION_CONFIG['name']}...")
+            result = await self._try_multi_image_extraction(
+                config=self.FALLBACK_VISION_CONFIG,
+                api_key=self.openai_api_key,
+                prompt=prompt,
+                images_base64=images_base64,
+                location=location,
+            )
+            
+            if result.success:
+                return result
+            else:
+                print(f"❌ {self.FALLBACK_VISION_CONFIG['name']} also failed: {result.error}")
         
         # Both failed
         return ExtractionResult(
@@ -297,7 +295,7 @@ class LLMService:
         Args:
             images_base64: List of base64 encoded image data
             location: Location for cost estimation
-            use_fallback: Whether to fall back to GPT-4o if Gemini fails
+            use_fallback: Whether to use the configured Terra fallback
             
         Returns:
             ExtractionResult with recipe dict or error
@@ -311,39 +309,38 @@ class LLMService:
         # Use multi-image prompt
         prompt = get_multi_image_ocr_prompt(num_images, location)
         
-        # Try Gemini Vision first (if API key available)
-        if self.openrouter_api_key:
-            print(f"🚀 Trying {self.GEMINI_VISION_CONFIG['name']} with {num_images} images...")
+        if not settings.is_ai_capability_enabled("ocr"):
+            return ExtractionResult(success=False, error="OCR is temporarily unavailable")
+
+        if self.openai_api_key:
+            print(f"🚀 Trying {self.PRIMARY_VISION_CONFIG['name']} with {num_images} images...")
             result = await self._try_multi_image_extraction(
-                config=self.GEMINI_VISION_CONFIG,
-                api_key=self.openrouter_api_key,
-                prompt=prompt,
-                images_base64=images_base64,
-                location=location,
-                is_openrouter=True
-            )
-            
-            if result.success:
-                return result
-            else:
-                print(f"⚠️ {self.GEMINI_VISION_CONFIG['name']} failed: {result.error}")
-        
-        # Fall back to GPT-4o Vision
-        if use_fallback and self.openai_api_key:
-            print(f"🔄 Falling back to {self.GPT_VISION_CONFIG['name']}...")
-            result = await self._try_multi_image_extraction(
-                config=self.GPT_VISION_CONFIG,
+                config=self.PRIMARY_VISION_CONFIG,
                 api_key=self.openai_api_key,
                 prompt=prompt,
                 images_base64=images_base64,
                 location=location,
-                is_openrouter=False
             )
             
             if result.success:
                 return result
             else:
-                print(f"❌ {self.GPT_VISION_CONFIG['name']} also failed: {result.error}")
+                print(f"⚠️ {self.PRIMARY_VISION_CONFIG['name']} failed: {result.error}")
+        
+        if use_fallback and self.openai_api_key:
+            print(f"🔄 Falling back to {self.FALLBACK_VISION_CONFIG['name']}...")
+            result = await self._try_multi_image_extraction(
+                config=self.FALLBACK_VISION_CONFIG,
+                api_key=self.openai_api_key,
+                prompt=prompt,
+                images_base64=images_base64,
+                location=location,
+            )
+            
+            if result.success:
+                return result
+            else:
+                print(f"❌ {self.FALLBACK_VISION_CONFIG['name']} also failed: {result.error}")
         
         # Both failed
         return ExtractionResult(
@@ -353,7 +350,7 @@ class LLMService:
     
     async def generate_json(self, prompt: str) -> Optional[dict]:
         """
-        Generate JSON from a prompt using Gemini (primary) or GPT (fallback).
+        Generate JSON using the configured routine and fallback models.
         
         Simpler interface for when you just need JSON output without
         the full recipe extraction pipeline.
@@ -361,33 +358,33 @@ class LLMService:
         Returns the parsed JSON dict, or None if extraction failed.
         """
         
-        # Try Gemini first
-        if self.openrouter_api_key:
-            try:
-                result = await self._call_simple_llm(
-                    config=self.GEMINI_CONFIG,
-                    api_key=self.openrouter_api_key,
-                    prompt=prompt,
-                    is_openrouter=True
-                )
-                if result:
-                    return result
-            except Exception as e:
-                print(f"⚠️ Gemini failed: {e}")
-        
-        # Fallback to GPT
+        if not settings.is_ai_capability_enabled("enrichment"):
+            return None
+
         if self.openai_api_key:
             try:
                 result = await self._call_simple_llm(
-                    config=self.GPT_CONFIG,
+                    config=self.PRIMARY_CONFIG,
                     api_key=self.openai_api_key,
                     prompt=prompt,
-                    is_openrouter=False
                 )
                 if result:
                     return result
             except Exception as e:
-                print(f"⚠️ GPT also failed: {e}")
+                print(f"⚠️ Primary enrichment model failed: {e}")
+        
+        # Use the higher-capability fallback after a failed routine response.
+        if self.openai_api_key:
+            try:
+                result = await self._call_simple_llm(
+                    config=self.FALLBACK_CONFIG,
+                    api_key=self.openai_api_key,
+                    prompt=prompt,
+                )
+                if result:
+                    return result
+            except Exception as e:
+                print(f"⚠️ Fallback enrichment model also failed: {e}")
         
         return None
     
@@ -396,7 +393,6 @@ class LLMService:
         config: dict,
         api_key: str,
         prompt: str,
-        is_openrouter: bool
     ) -> Optional[dict]:
         """Make a simple LLM API call and return parsed JSON."""
         
@@ -405,22 +401,17 @@ class LLMService:
             "Content-Type": "application/json",
         }
         
-        if is_openrouter:
-            headers["HTTP-Referer"] = "https://recipe-extractor.app"
-            headers["X-Title"] = "Recipe Extractor"
-        
         payload = {
             "model": config["model"],
             "messages": [
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.1,
-            "max_tokens": 4000,
+            "reasoning_effort": settings.openai_reasoning_effort,
+            "max_completion_tokens": 4000,
         }
         
-        if not is_openrouter:
-            payload["response_format"] = {"type": "json_object"}
+        payload["response_format"] = {"type": "json_object"}
         
         url = f"{config['base_url']}/chat/completions"
         
@@ -446,7 +437,6 @@ class LLMService:
         prompt: str,
         images_base64: list[str],
         location: str,
-        is_openrouter: bool
     ) -> ExtractionResult:
         """Try multi-image extraction with a specific model, with retries."""
         
@@ -465,7 +455,6 @@ class LLMService:
                     prompt=prompt,
                     images_base64=images_base64,
                     location=location,
-                    is_openrouter=is_openrouter
                 )
                 
                 if result.success:
@@ -490,7 +479,6 @@ class LLMService:
         prompt: str,
         images_base64: list[str],
         location: str,
-        is_openrouter: bool
     ) -> ExtractionResult:
         """Make a multi-image vision LLM API call."""
         
@@ -501,11 +489,6 @@ class LLMService:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        
-        # OpenRouter specific headers
-        if is_openrouter:
-            headers["HTTP-Referer"] = "https://recipe-extractor.app"
-            headers["X-Title"] = "Recipe Extractor"
         
         # Build content array with all images, labeled by page number
         content = []
@@ -539,8 +522,8 @@ class LLMService:
                     "content": content
                 }
             ],
-            "temperature": 0.1,
-            "max_tokens": 5000,  # Increased for multi-image
+            "reasoning_effort": settings.openai_reasoning_effort,
+            "max_completion_tokens": 5000,
         }
         
         url = f"{config['base_url']}/chat/completions"
@@ -617,7 +600,6 @@ class LLMService:
         prompt: str,
         image_base64: str,
         location: str,
-        is_openrouter: bool
     ) -> ExtractionResult:
         """Try vision extraction with a specific model, with retries."""
         
@@ -636,7 +618,6 @@ class LLMService:
                     prompt=prompt,
                     image_base64=image_base64,
                     location=location,
-                    is_openrouter=is_openrouter
                 )
                 
                 if result.success:
@@ -661,7 +642,6 @@ class LLMService:
         prompt: str,
         image_base64: str,
         location: str,
-        is_openrouter: bool
     ) -> ExtractionResult:
         """Make a single vision LLM API call."""
         
@@ -672,11 +652,6 @@ class LLMService:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        
-        # OpenRouter specific headers
-        if is_openrouter:
-            headers["HTTP-Referer"] = "https://recipe-extractor.app"
-            headers["X-Title"] = "Recipe Extractor"
         
         # Determine image MIME type (default to jpeg)
         mime_type = "image/jpeg"
@@ -710,8 +685,8 @@ class LLMService:
                     ]
                 }
             ],
-            "temperature": 0.1,
-            "max_tokens": 4000,
+            "reasoning_effort": settings.openai_reasoning_effort,
+            "max_completion_tokens": 4000,
         }
         
         url = f"{config['base_url']}/chat/completions"
@@ -773,7 +748,6 @@ class LLMService:
         prompt: str,
         source_url: str,
         location: str,
-        is_openrouter: bool
     ) -> ExtractionResult:
         """Try extraction with a specific model, with retries."""
         
@@ -793,7 +767,6 @@ class LLMService:
                     prompt=prompt,
                     source_url=source_url,
                     location=location,
-                    is_openrouter=is_openrouter
                 )
                 
                 if result.success:
@@ -818,7 +791,6 @@ class LLMService:
         prompt: str,
         source_url: str,
         location: str,
-        is_openrouter: bool
     ) -> ExtractionResult:
         """Make a single LLM API call."""
         
@@ -830,24 +802,17 @@ class LLMService:
             "Content-Type": "application/json",
         }
         
-        # OpenRouter specific headers
-        if is_openrouter:
-            headers["HTTP-Referer"] = "https://recipe-extractor.app"
-            headers["X-Title"] = "Recipe Extractor"
-        
         payload = {
             "model": config["model"],
             "messages": [
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.1,
-            "max_tokens": 4000,
+            "reasoning_effort": settings.openai_reasoning_effort,
+            "max_completion_tokens": 4000,
         }
         
-        # OpenAI supports response_format for guaranteed JSON
-        if not is_openrouter:
-            payload["response_format"] = {"type": "json_object"}
+        payload["response_format"] = {"type": "json_object"}
         
         url = f"{config['base_url']}/chat/completions"
         
@@ -1038,4 +1003,3 @@ class LLMService:
 
 # Singleton instance
 llm_service = LLMService()
-

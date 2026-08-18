@@ -2,7 +2,7 @@
 
 import hashlib
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from uuid import UUID
 
 import boto3
@@ -10,10 +10,15 @@ import httpx
 from botocore.exceptions import ClientError
 
 from app.config import get_settings
+from app.image_validation import (
+    ImageValidationError,
+    decode_and_validate_base64_image,
+    validate_image_bytes,
+)
 from app.security import PublicHTTPTransport
 
 MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024
-MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024
 
 
 class StorageService:
@@ -112,6 +117,13 @@ class StorageService:
             # Download image from external URL
             print(f"📥 Downloading thumbnail from: {image_url[:60]}...")
             image_data, content_type = await self._download_public_url(image_url)
+            validated = validate_image_bytes(
+                image_data,
+                max_bytes=MAX_THUMBNAIL_BYTES,
+                declared_content_type=content_type,
+            )
+            image_data = validated.data
+            content_type = validated.content_type
             
             # Determine file extension
             if "png" in content_type:
@@ -258,10 +270,15 @@ class StorageService:
             print("⚠️ S3 not configured, skipping thumbnail upload")
             return None
         
-        if not image_data:
-            return None
-        
         try:
+            validated = validate_image_bytes(
+                image_data,
+                max_bytes=MAX_THUMBNAIL_BYTES,
+                declared_content_type=content_type,
+            )
+            image_data = validated.data
+            content_type = validated.content_type
+
             # Determine file extension from content type
             if "png" in content_type:
                 extension = "png"
@@ -291,6 +308,9 @@ class StorageService:
             print(f"✅ Thumbnail uploaded: {s3_url}")
             return s3_url
             
+        except ImageValidationError as e:
+            print(f"❌ Invalid thumbnail image: {e}")
+            return None
         except ClientError as e:
             print(f"❌ Failed to upload to S3: {e}")
             return None
@@ -324,29 +344,23 @@ class StorageService:
             return None
         
         try:
-            import base64
-            
-            # Decode base64 to bytes
-            image_data = base64.b64decode(image_base64, validate=True)
-            if len(image_data) > MAX_CHAT_IMAGE_BYTES:
-                print("⚠️ Chat image too large, skipping upload")
-                return None
+            validated = decode_and_validate_base64_image(
+                image_base64,
+                max_bytes=MAX_CHAT_IMAGE_BYTES,
+            )
+            image_data = validated.data
             
             # Generate a hash-based filename for deduplication
             image_hash = hashlib.sha256(image_data).hexdigest()[:12]
             
             # Determine content type from base64 prefix
-            content_type = "image/jpeg"
-            extension = "jpg"
-            if image_base64.startswith("iVBOR"):
-                content_type = "image/png"
-                extension = "png"
-            elif image_base64.startswith("R0lG"):
-                content_type = "image/gif"
-                extension = "gif"
-            elif image_base64.startswith("UklG"):
-                content_type = "image/webp"
-                extension = "webp"
+            content_type = validated.content_type
+            extension = {
+                "image/jpeg": "jpg",
+                "image/png": "png",
+                "image/gif": "gif",
+                "image/webp": "webp",
+            }[content_type]
             
             # Upload to S3 under chat-images folder
             s3_key = f"chat-images/{user_id}/{image_hash}.{extension}"
@@ -371,7 +385,24 @@ class StorageService:
             print(f"❌ Failed to upload chat image to S3: {e}")
             return None
 
+    def is_owned_chat_image_url(self, image_url: str, user_id: str) -> bool:
+        """Return whether a public URL points to this user's app-owned chat object."""
+        if not self.bucket_name:
+            return False
+
+        parsed = urlparse(image_url)
+        settings = get_settings()
+        expected_host = f"{self.bucket_name}.s3.{settings.aws_region}.amazonaws.com"
+        expected_prefix = f"/chat-images/{user_id}/"
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == expected_host
+            and parsed.path.startswith(expected_prefix)
+            and ".." not in parsed.path
+            and not parsed.query
+            and not parsed.fragment
+        )
+
 
 # Singleton instance
 storage_service = StorageService()
-

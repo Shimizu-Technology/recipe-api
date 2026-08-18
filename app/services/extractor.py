@@ -403,7 +403,7 @@ class RecipeExtractor:
                     extras={
                         "url": url,
                         "platform": platform,
-                        "has_cookies": video_service._get_instagram_cookies_path() is not None,
+                        "has_cookies": video_service.instagram_cookies_configured,
                     },
                     tags={
                         "platform": "instagram",
@@ -494,7 +494,7 @@ class RecipeExtractor:
         Extract recipe from a TikTok photo/slideshow post using vision AI.
         
         TikTok photo posts are image carousels without audio, so we use
-        Gemini 2.0 Flash Vision to analyze the images directly.
+        the configured multimodal extraction model to analyze the images directly.
         """
         print(f"📸 Starting TikTok photo extraction for: {url}")
         
@@ -626,4 +626,3 @@ class RecipeExtractor:
 
 # Singleton instance
 recipe_extractor = RecipeExtractor()
-

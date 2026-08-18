@@ -56,6 +56,9 @@ async def generate_tts(
             status_code=500,
             detail="OpenAI API key not configured"
         )
+
+    if not settings.is_ai_capability_enabled("tts"):
+        raise HTTPException(status_code=503, detail="Text-to-speech is temporarily unavailable")
     
     try:
         # Call OpenAI TTS API
@@ -67,7 +70,7 @@ async def generate_tts(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "tts-1",  # Use tts-1 for speed, tts-1-hd for quality
+                    "model": settings.tts_model,
                     "input": request.text,
                     "voice": request.voice,
                     "response_format": "mp3",
@@ -75,10 +78,10 @@ async def generate_tts(
             )
             
             if response.status_code != 200:
-                error_detail = response.text[:200] if response.text else "Unknown error"
+                print(f"❌ OpenAI TTS request failed with status {response.status_code}")
                 raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"OpenAI TTS API error: {error_detail}"
+                    status_code=502,
+                    detail="Speech generation is temporarily unavailable.",
                 )
             
             # Return audio as streaming response
@@ -96,11 +99,13 @@ async def generate_tts(
             status_code=504,
             detail="TTS generation timed out. Try shorter text."
         )
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ TTS error: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"TTS generation failed: {str(e)}"
+            detail="Speech generation failed. Please try again."
         )
 
 

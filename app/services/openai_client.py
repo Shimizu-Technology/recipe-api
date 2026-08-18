@@ -47,7 +47,10 @@ class OpenAIService:
         Returns:
             TranscriptionResult with text or error
         """
-        print(f"🗣️ Transcribing audio with Whisper: {audio_file_path}")
+        if not settings.is_ai_capability_enabled("transcription"):
+            return TranscriptionResult(success=False, error="Transcription is temporarily unavailable")
+
+        print(f"🗣️ Transcribing audio with {settings.transcription_model}: {audio_file_path}")
         
         try:
             # Read the audio file
@@ -62,7 +65,7 @@ class OpenAIService:
             with open(audio_path, "rb") as audio_file:
                 transcription = await self.client.audio.transcriptions.create(
                     file=audio_file,
-                    model="whisper-1",
+                    model=settings.transcription_model,
                     language="en",
                     response_format="text",
                     temperature=0.0  # More deterministic output
@@ -89,7 +92,7 @@ class OpenAIService:
         location: str = "Guam"
     ) -> ExtractionResult:
         """
-        Extract structured recipe data using GPT-4o-mini.
+        Extract structured recipe data using the configured routine model.
         
         Args:
             source_url: Original video URL
@@ -99,7 +102,10 @@ class OpenAIService:
         Returns:
             ExtractionResult with recipe dict or error
         """
-        print("🤖 Extracting recipe with GPT-4o-mini...")
+        if not settings.is_ai_capability_enabled("recipe_extraction"):
+            return ExtractionResult(success=False, error="Recipe extraction is temporarily unavailable")
+
+        print(f"🤖 Extracting recipe with {settings.recipe_extraction_model}...")
         print(f"📍 Location: {location}")
         print(f"📝 Content length: {len(content)} chars")
         
@@ -111,7 +117,7 @@ class OpenAIService:
         
         try:
             response = await self.client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=settings.recipe_extraction_model,
                 messages=[
                     {
                         "role": "system",
@@ -123,8 +129,8 @@ class OpenAIService:
                     }
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.1,  # Low temperature for consistent output
-                max_tokens=4000
+                reasoning_effort=settings.openai_reasoning_effort,
+                max_completion_tokens=4000,
             )
             
             # Parse the response
@@ -256,13 +262,11 @@ class OpenAIService:
     
     @staticmethod
     def estimate_gpt_cost(input_tokens: int, output_tokens: int) -> float:
-        """Estimate GPT-4o-mini cost based on tokens."""
-        # GPT-4o-mini: $0.15/1M input, $0.60/1M output
-        input_cost = (input_tokens / 1_000_000) * 0.15
-        output_cost = (output_tokens / 1_000_000) * 0.60
+        """Estimate current GPT-5.6 Luna short-context token cost."""
+        input_cost = (input_tokens / 1_000_000) * 0.20
+        output_cost = (output_tokens / 1_000_000) * 1.20
         return input_cost + output_cost
 
 
 # Singleton instance
 openai_service = OpenAIService()
-

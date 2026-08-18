@@ -76,7 +76,7 @@ async def root():
         "name": settings.api_title,
         "version": settings.api_version,
         "docs": "/docs",
-        "health": "/health",
+        "health": "/up",
     }
 
 
