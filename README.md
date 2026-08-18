@@ -15,6 +15,9 @@ cp .env.example .env
 # Run the server
 uv run uvicorn app.main:app --reload --host 0.0.0.0
 
+# Run the complete local/CI verification gate
+./scripts/gate.sh
+
 # Or activate venv and run directly
 source .venv/bin/activate
 uvicorn app.main:app --reload --host 0.0.0.0
@@ -266,4 +269,3 @@ See `docs/CLERK_PROD_CUTOVER_RUNBOOK.md` for the Clerk production cutover runboo
 ## License
 
 Private - Shimizu Technology
-

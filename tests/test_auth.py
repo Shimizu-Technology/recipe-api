@@ -3,6 +3,7 @@ import importlib
 import jwt
 import pytest
 from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 
 from app.config import get_settings
 
@@ -49,3 +50,21 @@ def test_get_token_issuer_unverified_rejects_missing_issuer(monkeypatch):
 
     assert exc_info.value.status_code == 401
     assert "missing issuer" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_optional_auth_treats_missing_credentials_as_guest(monkeypatch):
+    auth = _reload_auth(monkeypatch)
+
+    assert await auth.get_optional_user(None) is None
+
+
+@pytest.mark.asyncio
+async def test_optional_auth_rejects_invalid_credentials(monkeypatch):
+    auth = _reload_auth(monkeypatch)
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="invalid-token")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.get_optional_user(credentials)
+
+    assert exc_info.value.status_code == 401

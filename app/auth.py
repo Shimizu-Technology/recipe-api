@@ -212,9 +212,8 @@ async def get_optional_user(
     """
     if credentials is None:
         return None
-    
-    try:
-        return verify_clerk_token(credentials.credentials)
-    except HTTPException:
-        return None
 
+    # A request without credentials is a guest request. A request that supplied
+    # invalid or expired credentials is an authentication failure and must not
+    # silently receive guest behavior.
+    return verify_clerk_token(credentials.credentials)
