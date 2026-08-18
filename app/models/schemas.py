@@ -214,10 +214,16 @@ class ExtractionJobResponse(BaseModel):
 # ============================================================
 
 class HealthResponse(BaseModel):
-    """Health check response."""
-    status: str = "healthy"
+    """Public process-liveness response with no dependency detail."""
+    status: str = "ok"
+
+
+class DiagnosticResponse(BaseModel):
+    """Admin-only dependency configuration and reachability response."""
+    status: str
     environment: str
-    database: str = "connected"
+    dependencies: dict[str, str]
+    disabled_ai_capabilities: list[str]
 
 
 class ErrorResponse(BaseModel):

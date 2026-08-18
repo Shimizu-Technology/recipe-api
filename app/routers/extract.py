@@ -7,17 +7,21 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.auth import ClerkUser, get_current_user
 from app.db import get_db
+from app.image_validation import ImageValidationError, validate_image_bytes
 from app.models.recipe import ExtractionJob, Recipe, RecipeVersion
 from app.services import recipe_extractor, storage_service, video_service
 from app.services.extractor import ExtractionProgress
 from app.services.llm_client import llm_service
+
+MAX_OCR_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_OCR_TOTAL_BYTES = 40 * 1024 * 1024
 
 
 def _parse_time_to_minutes(time_str: str) -> Optional[int]:
@@ -251,9 +255,9 @@ async def _user_can_access_job(db: AsyncSession, job: ExtractionJob | None, user
 # Request/Response models
 class ExtractRequest(BaseModel):
     """Request to extract a recipe from URL."""
-    url: str
-    location: str = "Guam"
-    notes: str = ""
+    url: str = Field(min_length=1, max_length=2_048)
+    location: str = Field(default="Guam", min_length=1, max_length=100)
+    notes: str = Field(default="", max_length=4_000)
     quick_check: bool = False  # If true, only check for existing
     is_public: bool = False  # Private unless the user explicitly publishes it
 
@@ -826,7 +830,7 @@ async def get_available_locations():
 
 class ReExtractAsyncRequest(BaseModel):
     """Request to re-extract a recipe asynchronously."""
-    location: str = "Guam"
+    location: str = Field(default="Guam", min_length=1, max_length=100)
 
 
 @router.post("/re-extract/{recipe_id}/async")
@@ -1159,37 +1163,31 @@ async def extract_recipe_from_image(
     - Recipe book pages
     - Screenshots of recipes
     
-    Uses Gemini 2.0 Flash Vision (primary) with GPT-4o Vision fallback.
+    Uses the pinned routine multimodal model with deterministic fallback.
     """
+    if len(location) > 100:
+        raise HTTPException(status_code=422, detail="Location is too long")
+
     print("📸 OCR extraction request received")
     print(f"📍 Location: {location}")
     print(f"📁 File: {image.filename}, Content-Type: {image.content_type}")
     
-    # Validate file type
-    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/jpg"]
-    if image.content_type not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type. Allowed types: {', '.join(allowed_types)}"
-        )
-    
-    # Read and encode image
     try:
         image_bytes = await image.read()
-        if len(image_bytes) > 20 * 1024 * 1024:  # 20MB limit
-            raise HTTPException(
-                status_code=400,
-                detail="Image file too large. Maximum size is 20MB."
-            )
-        
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-        print(f"🖼️ Image size: {len(image_bytes) // 1024}KB")
-        
+        validated = validate_image_bytes(
+            image_bytes,
+            max_bytes=MAX_OCR_IMAGE_BYTES,
+            declared_content_type=image.content_type,
+        )
+        image_base64 = base64.b64encode(validated.data).decode("utf-8")
+        print(f"🖼️ Image size: {len(validated.data) // 1024}KB")
+    except ImageValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to read image: {str(e)}"
-        )
+            detail="Failed to read image",
+        ) from e
     
     # Extract recipe using vision models
     result = await llm_service.extract_from_image(
@@ -1231,6 +1229,9 @@ async def extract_recipe_from_multiple_images(
     
     All images are analyzed together to extract ONE complete recipe.
     """
+    if len(location) > 100:
+        raise HTTPException(status_code=422, detail="Location is too long")
+
     print("📸 Multi-image OCR extraction request received")
     print(f"📍 Location: {location}")
     print(f"🖼️ Number of images: {len(images)}")
@@ -1241,50 +1242,39 @@ async def extract_recipe_from_multiple_images(
     if len(images) > 10:
         raise HTTPException(status_code=400, detail="Maximum 10 images allowed")
     
-    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/jpg"]
     images_base64 = []
     total_size = 0
     
     for i, image in enumerate(images):
         print(f"   Image {i+1}: {image.filename}, {image.content_type}")
         
-        # Validate file type
-        if image.content_type not in allowed_types:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file type for image {i+1}. Allowed types: {', '.join(allowed_types)}"
-            )
-        
-        # Read and encode image
         try:
             image_bytes = await image.read()
-            size_kb = len(image_bytes) // 1024
-            total_size += size_kb
-            
-            if len(image_bytes) > 20 * 1024 * 1024:  # 20MB per image
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Image {i+1} is too large. Maximum size is 20MB per image."
-                )
-            
-            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+            validated = validate_image_bytes(
+                image_bytes,
+                max_bytes=MAX_OCR_IMAGE_BYTES,
+                declared_content_type=image.content_type,
+            )
+            total_size += len(validated.data)
+            image_base64 = base64.b64encode(validated.data).decode("utf-8")
             images_base64.append(image_base64)
-            
+        except ImageValidationError as e:
+            raise HTTPException(status_code=422, detail=f"Image {i + 1}: {e}") from e
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"Failed to read image {i+1}: {str(e)}"
-            )
+                detail=f"Failed to read image {i + 1}",
+            ) from e
     
-    print(f"📦 Total size: {total_size}KB across {len(images)} images")
+    print(f"📦 Total size: {total_size // 1024}KB across {len(images)} images")
     
     # Check total size limit (50MB total)
-    if total_size > 50 * 1024:
+    if total_size > MAX_OCR_TOTAL_BYTES:
         raise HTTPException(
-            status_code=400,
-            detail="Total image size too large. Maximum combined size is 50MB."
+            status_code=422,
+            detail="Total image size too large. Maximum combined size is 40MB."
         )
     
     # Extract recipe using multi-image vision

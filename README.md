@@ -33,11 +33,20 @@ Create a `.env` file:
 # Database (required)
 DATABASE_URL=postgresql://user:pass@host/dbname
 
-# OpenAI - Whisper transcription + GPT chat (required)
+# OpenAI - pinned recipe AI, transcription, and speech (required)
 OPENAI_API_KEY=sk-...
 
-# OpenRouter - Gemini extraction (required)
-OPENROUTER_API_KEY=sk-or-...
+# Routine work uses Luna. Terra is the deterministic extraction/OCR fallback.
+RECIPE_EXTRACTION_MODEL=gpt-5.6-luna
+RECIPE_EXTRACTION_FALLBACK_MODEL=gpt-5.6-terra
+OCR_MODEL=gpt-5.6-luna
+OCR_FALLBACK_MODEL=gpt-5.6-terra
+RECIPE_CHAT_MODEL=gpt-5.6-luna
+COOKING_CHAT_MODEL=gpt-5.6-luna
+ENRICHMENT_MODEL=gpt-5.6-luna
+OPENAI_REASONING_EFFORT=none
+# Emergency provider kill switch: recipe_chat,ocr or all
+AI_DISABLED_CAPABILITIES=
 
 # Clerk Auth (required)
 CLERK_FRONTEND_API=your-clerk-domain.clerk.accounts.dev
@@ -101,7 +110,7 @@ Instagram requires authentication to extract videos. To enable:
 ### Video Extraction
 ```
 User pastes video URL → yt-dlp downloads audio → Whisper transcribes
-    → Gemini extracts recipe → Thumbnail uploaded to S3 → Saved to PostgreSQL
+    → Luna extracts recipe (Terra fallback) → Thumbnail uploaded to S3 → Saved to PostgreSQL
 ```
 
 ### Website Extraction
@@ -116,12 +125,19 @@ Supported sites: AllRecipes, Budget Bytes, Half Baked Harvest, Delish, Pinch of 
 **AI Stack:**
 | Task | Model |
 |------|-------|
-| Transcription | OpenAI Whisper |
-| Recipe Extraction (Video) | Gemini 2.0 Flash (primary), GPT-4o-mini (fallback) |
-| Recipe Extraction (Website) | JSON-LD parsing (primary), GPT-4o-mini (fallback) |
-| Recipe Extraction (OCR) | Gemini 2.0 Flash Vision (primary), GPT-4o Vision (fallback) |
-| Recipe Chat | GPT-4o |
-| Tag/Nutrition AI | GPT-4o-mini |
+| Transcription | `whisper-1` |
+| Recipe Extraction (Video) | GPT-5.6 Luna (routine), GPT-5.6 Terra (fallback) |
+| Recipe Extraction (Website) | JSON-LD parsing (primary), Luna/Terra AI fallback |
+| Recipe Extraction (OCR) | GPT-5.6 Luna (routine), GPT-5.6 Terra (fallback) |
+| Recipe and Cooking Chat | GPT-5.6 Luna |
+| Tag/Nutrition AI | GPT-5.6 Luna |
+| Text-to-Speech | `tts-1` |
+
+Model IDs are environment-pinned rather than provider aliases. Routine AI uses
+`reasoning_effort=none`; Terra is not called unless extraction/OCR needs a
+fallback. `AI_DISABLED_CAPABILITIES` can stop one paid capability (or `all`)
+without a deploy. Chat inputs are bounded, image bytes are decoded and checked,
+and per-user request/concurrency limits protect provider spend.
 
 ## Project Structure
 
@@ -142,8 +158,8 @@ app/
     ├── extractor.py  # Main extraction orchestrator
     ├── video.py      # yt-dlp audio download
     ├── website.py    # Website recipe extraction (JSON-LD, HTML parsing)
-    ├── llm_client.py # Gemini/GPT extraction
-    ├── openai_client.py  # Whisper + chat
+    ├── llm_client.py # Luna/Terra extraction and OCR
+    ├── openai_client.py  # Whisper + direct extraction
     └── storage.py    # S3 uploads
 ```
 
@@ -229,7 +245,8 @@ source text for editing and diagnostics.
 
 ## Admin Setup
 
-Admins can re-extract any recipe. Set via Clerk:
+Admins can re-extract any recipe and read bounded operational diagnostics. Set
+the role via Clerk:
 
 1. **Clerk Dashboard** → Users → Select user
 2. **Public metadata** → Add:
@@ -241,6 +258,15 @@ Admins can re-extract any recipe. Set via Clerk:
    ```json
    { "public_metadata": "{{user.public_metadata}}" }
    ```
+
+### Health and diagnostics
+
+- `GET /up` is the public, dependency-free liveness endpoint. Configure Render's
+  health check to use this path so a temporary database outage does not create a
+  restart loop. `GET /health` remains a compatibility alias with the same shape.
+- `GET /api/admin/diagnostics` requires an authenticated admin. It checks the
+  database and reports only bounded configuration state (never credentials,
+  provider responses, or database connection strings).
 
 ## Database Migrations
 
@@ -270,7 +296,8 @@ See `docs/CLERK_PROD_CUTOVER_RUNBOOK.md` for the Clerk production cutover runboo
 
 1. Connect GitHub repo to Render
 2. Set environment variables in dashboard
-3. Auto-deploys on push to `main`
+3. Set the service health-check path to `/up`
+4. Auto-deploys on push to `main`
 
 **Build Command:** `pip install -r requirements.txt`  
 **Start Command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`

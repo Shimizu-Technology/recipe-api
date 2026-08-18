@@ -1,6 +1,7 @@
 from functools import lru_cache
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 UNSUPPORTED_ASYNCPG_QUERY_PARAMS = frozenset({"sslmode", "channel_binding"})
@@ -20,9 +21,21 @@ class Settings(BaseSettings):
     
     # OpenAI
     openai_api_key: str
-    
-    # OpenRouter (optional - for model benchmarking/switching)
-    openrouter_api_key: str | None = None
+
+    # AI capability registry. Model IDs are pinned so a provider alias cannot
+    # silently change behavior. Luna handles routine work; Terra is reserved
+    # for deterministic fallback after a failed/invalid result.
+    recipe_extraction_model: str = "gpt-5.6-luna"
+    recipe_extraction_fallback_model: str = "gpt-5.6-terra"
+    ocr_model: str = "gpt-5.6-luna"
+    ocr_fallback_model: str = "gpt-5.6-terra"
+    recipe_chat_model: str = "gpt-5.6-luna"
+    cooking_chat_model: str = "gpt-5.6-luna"
+    enrichment_model: str = "gpt-5.6-luna"
+    transcription_model: str = "whisper-1"
+    tts_model: str = "tts-1"
+    openai_reasoning_effort: str = "none"
+    ai_disabled_capabilities: str = ""
     
     # Clerk Auth
     clerk_secret_key: str | None = None
@@ -50,6 +63,10 @@ class Settings(BaseSettings):
     # YouTube blocks datacenter IPs, so a residential proxy is needed
     # Format: http://username:password@p.webshare.io:80
     youtube_proxy: str | None = None
+    video_download_timeout_seconds: int = 120
+    video_metadata_timeout_seconds: int = 30
+    video_max_duration_seconds: int = 3_600
+    audio_max_bytes: int = 25 * 1024 * 1024
     
     # Sentry error monitoring
     sentry_dsn: str | None = None
@@ -62,6 +79,45 @@ class Settings(BaseSettings):
     # API Settings
     api_title: str = "Recipe Extractor API"
     api_version: str = "1.0.0"
+
+    @model_validator(mode="after")
+    def validate_ai_registry(self) -> "Settings":
+        """Reject missing, retired, or unsafe active model configuration."""
+        configured_models = {
+            "recipe_extraction": self.recipe_extraction_model,
+            "recipe_extraction_fallback": self.recipe_extraction_fallback_model,
+            "ocr": self.ocr_model,
+            "ocr_fallback": self.ocr_fallback_model,
+            "recipe_chat": self.recipe_chat_model,
+            "cooking_chat": self.cooking_chat_model,
+            "enrichment": self.enrichment_model,
+            "transcription": self.transcription_model,
+            "tts": self.tts_model,
+        }
+        for capability, model_id in configured_models.items():
+            normalized = model_id.strip().lower()
+            if not normalized:
+                raise ValueError(f"{capability} model ID is required")
+            if "gemini-2." in normalized or normalized.startswith("gpt-4o"):
+                raise ValueError(f"{capability} uses a retired or deprecated model")
+
+        if self.openai_reasoning_effort not in {"none", "low", "medium", "high", "xhigh"}:
+            raise ValueError("OPENAI_REASONING_EFFORT must be none, low, medium, high, or xhigh")
+        return self
+
+    @property
+    def disabled_ai_capability_set(self) -> set[str]:
+        """Capabilities disabled through the emergency runtime kill switch."""
+        return {
+            capability.strip().lower()
+            for capability in self.ai_disabled_capabilities.split(",")
+            if capability.strip()
+        }
+
+    def is_ai_capability_enabled(self, capability: str) -> bool:
+        """Return whether a capability is allowed to call a paid provider."""
+        disabled = self.disabled_ai_capability_set
+        return "all" not in disabled and capability.lower() not in disabled
     
     @property
     def s3_enabled(self) -> bool:
@@ -177,4 +233,3 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
-

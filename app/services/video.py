@@ -3,6 +3,8 @@
 import asyncio
 import os
 import re
+import shutil
+import signal
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -26,6 +28,28 @@ def _redact_sensitive_values(text: str) -> str:
     if settings.youtube_proxy:
         redacted = redacted.replace(settings.youtube_proxy, "<proxy-url>")
     return redacted
+
+
+async def _terminate_process(process: asyncio.subprocess.Process | None) -> None:
+    """Best-effort termination for timeout, cancellation, and unexpected exits."""
+    if not process or process.returncode is not None:
+        return
+
+    try:
+        process_id = getattr(process, "pid", None)
+        if os.name == "posix" and process_id:
+            # Media tools may spawn ffmpeg. Each process is started as its own
+            # session leader, so its PID is also the process-group ID.
+            os.killpg(process_id, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
 
 
 # ============================================================
@@ -165,6 +189,20 @@ class AudioExtractionResult:
     error: Optional[str] = None
     error_code: Optional[str] = None  # Machine-readable error code
     friendly_error: Optional[str] = None  # User-friendly error message
+
+
+@dataclass
+class CredentialFile:
+    """A credential path with explicit ownership and cleanup semantics."""
+    path: str
+    temporary: bool = False
+
+    def cleanup(self) -> None:
+        if self.temporary:
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
 
 
 class VideoService:
@@ -615,13 +653,23 @@ class VideoService:
         
         return VideoMetadata()
     
-    def _get_instagram_cookies_path(self) -> Optional[str]:
+    @property
+    def instagram_cookies_configured(self) -> bool:
+        """Return whether usable Instagram credentials are configured."""
+        cookies = settings.instagram_cookies
+        if not cookies:
+            return False
+        if cookies.strip().startswith(("# Netscape", "#HttpOnly")):
+            return True
+        return os.path.isfile(cookies)
+
+    def _create_instagram_cookies_file(self) -> Optional[CredentialFile]:
         """
-        Get path to Instagram cookies file.
+        Resolve Instagram cookies to a restrictive, uniquely named file.
         
         If INSTAGRAM_COOKIES env var contains cookie content (starts with '# Netscape'),
-        write it to a temp file and return the path.
-        If it's a file path, return it directly.
+        write it to a caller-owned temporary file. Existing configured paths are
+        never deleted by the application.
         """
         cookies = settings.instagram_cookies
         if not cookies:
@@ -629,19 +677,30 @@ class VideoService:
         
         # Check if it's raw cookie content vs a file path
         if cookies.strip().startswith("# Netscape") or cookies.strip().startswith("#HttpOnly"):
-            # It's cookie content - write to temp file
-            cookies_path = "/tmp/instagram_cookies.txt"
+            cookies_path = None
             try:
-                with open(cookies_path, "w") as f:
-                    f.write(cookies)
-                return cookies_path
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    prefix="hafa-instagram-",
+                    suffix=".cookies.txt",
+                    delete=False,
+                ) as cookie_file:
+                    cookies_path = cookie_file.name
+                    cookie_file.write(cookies)
+                os.chmod(cookies_path, 0o600)
+                return CredentialFile(path=cookies_path, temporary=True)
             except Exception as e:
+                if cookies_path:
+                    try:
+                        os.unlink(cookies_path)
+                    except FileNotFoundError:
+                        pass
                 print(f"⚠️ Failed to write Instagram cookies: {e}")
                 return None
         else:
-            # It's a file path
-            if os.path.exists(cookies):
-                return cookies
+            if os.path.isfile(cookies):
+                return CredentialFile(path=cookies)
             else:
                 print(f"⚠️ Instagram cookies file not found: {cookies}")
                 return None
@@ -660,6 +719,9 @@ class VideoService:
         
         # Detect platform for Instagram-specific handling
         platform = self.detect_platform(url)
+        credential_file: Optional[CredentialFile] = None
+        process: Optional[asyncio.subprocess.Process] = None
+        keep_temp_dir = False
         
         try:
             # Build yt-dlp command
@@ -670,6 +732,8 @@ class VideoService:
                 "--audio-quality", "0",
                 "--output", output_template,
                 "--no-playlist",
+                "--max-filesize", str(settings.audio_max_bytes),
+                "--match-filter", f"duration <= {settings.video_max_duration_seconds}",
                 "--quiet",
             ]
             
@@ -690,34 +754,43 @@ class VideoService:
                     print("🔄 Using residential proxy for Instagram extraction")
                     command.extend(["--proxy", settings.youtube_proxy])
                 
-                cookies_path = self._get_instagram_cookies_path()
-                if cookies_path:
-                    command.extend(["--cookies", cookies_path])
-                    print(f"🍪 Using Instagram cookies from: {cookies_path}")
+                credential_file = self._create_instagram_cookies_file()
+                if credential_file:
+                    command.extend(["--cookies", credential_file.path])
+                    print("🍪 Using configured Instagram credentials")
                 else:
                     print("⚠️ Instagram extraction may fail without cookies")
             
             # URL must be last argument
             command.append(url)
             
-            safe_command = ["<proxy-url>" if i > 0 and command[i - 1] == "--proxy" else part for i, part in enumerate(command)]
+            safe_command = [
+                "<secret>" if i > 0 and command[i - 1] in {"--proxy", "--cookies"} else part
+                for i, part in enumerate(command)
+            ]
             print(f"🎵 Executing: {' '.join(safe_command)}")
             
             # Run yt-dlp asynchronously
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
             
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=120  # 2 minute timeout
+                timeout=settings.video_download_timeout_seconds
             )
             
             if process.returncode != 0:
                 error_msg = stderr.decode() if stderr else "Unknown error"
                 safe_error_msg = _redact_sensitive_values(error_msg)
+                if credential_file:
+                    safe_error_msg = safe_error_msg.replace(
+                        credential_file.path,
+                        "<credential-file>",
+                    )
                 print(f"❌ yt-dlp failed: {safe_error_msg}")
                 
                 # Get friendly error message
@@ -742,10 +815,26 @@ class VideoService:
                 )
             
             audio_file = str(audio_files[0])
+            if os.path.getsize(audio_file) > settings.audio_max_bytes:
+                return AudioExtractionResult(
+                    success=False,
+                    error="Downloaded audio exceeds the configured size limit",
+                    error_code="AUDIO_TOO_LARGE",
+                    friendly_error="This video's audio is too large to process.",
+                )
             print(f"✅ Audio downloaded: {audio_file}")
             
             # Try to get duration using ffprobe
             duration = await self._get_audio_duration(audio_file)
+            if duration and duration > settings.video_max_duration_seconds:
+                return AudioExtractionResult(
+                    success=False,
+                    error="Video duration exceeds the configured limit",
+                    error_code="VIDEO_TOO_LONG",
+                    friendly_error="This video is too long to process.",
+                )
+
+            keep_temp_dir = True
             
             return AudioExtractionResult(
                 success=True,
@@ -754,9 +843,10 @@ class VideoService:
             )
             
         except asyncio.TimeoutError:
+            await _terminate_process(process)
             return AudioExtractionResult(
                 success=False,
-                error="Audio download timed out after 120 seconds",
+                error=f"Audio download timed out after {settings.video_download_timeout_seconds} seconds",
                 error_code="TIMEOUT",
                 friendly_error="The video took too long to download. Please try again later."
             )
@@ -768,15 +858,25 @@ class VideoService:
                 friendly_error="A system error occurred. Please try again later."
             )
         except Exception as e:
+            safe_error = _redact_sensitive_values(str(e))
+            if credential_file:
+                safe_error = safe_error.replace(credential_file.path, "<credential-file>")
             return AudioExtractionResult(
                 success=False,
-                error=str(e),
+                error=safe_error,
                 error_code="UNKNOWN_ERROR",
                 friendly_error="An unexpected error occurred. Please try again."
             )
+        finally:
+            await _terminate_process(process)
+            if credential_file:
+                credential_file.cleanup()
+            if not keep_temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
     
     async def _get_audio_duration(self, file_path: str) -> Optional[float]:
         """Get audio duration using ffprobe."""
+        process: Optional[asyncio.subprocess.Process] = None
         try:
             process = await asyncio.create_subprocess_exec(
                 "ffprobe",
@@ -785,18 +885,26 @@ class VideoService:
                 "-of", "csv=p=0",
                 file_path,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
-            stdout, _ = await process.communicate()
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
             if stdout:
                 return float(stdout.decode().strip())
+        except asyncio.TimeoutError:
+            await _terminate_process(process)
+            print("⚠️ ffprobe timed out")
         except Exception as e:
             print(f"⚠️ Could not get audio duration: {e}")
+        finally:
+            await _terminate_process(process)
         return None
     
     async def get_video_metadata_ytdlp(self, url: str) -> VideoMetadata:
         """Get video metadata using yt-dlp (no download)."""
         platform = self.detect_platform(url)
+        credential_file: Optional[CredentialFile] = None
+        process: Optional[asyncio.subprocess.Process] = None
         
         try:
             command = [
@@ -818,9 +926,9 @@ class VideoService:
                 if settings.youtube_proxy:
                     command.extend(["--proxy", settings.youtube_proxy])
                 
-                cookies_path = self._get_instagram_cookies_path()
-                if cookies_path:
-                    command.extend(["--cookies", cookies_path])
+                credential_file = self._create_instagram_cookies_file()
+                if credential_file:
+                    command.extend(["--cookies", credential_file.path])
             
             # URL must be last
             command.append(url)
@@ -828,12 +936,13 @@ class VideoService:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
             
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=30
+                timeout=settings.video_metadata_timeout_seconds
             )
             
             if process.returncode == 0 and stdout:
@@ -846,8 +955,15 @@ class VideoService:
                     duration=data.get("duration", 0),
                     uploader=data.get("uploader", "")
                 )
+        except asyncio.TimeoutError:
+            await _terminate_process(process)
+            print("⚠️ yt-dlp metadata extraction timed out")
         except Exception as e:
             print(f"⚠️ yt-dlp metadata extraction failed: {e}")
+        finally:
+            await _terminate_process(process)
+            if credential_file:
+                credential_file.cleanup()
         
         return VideoMetadata()
     
@@ -868,4 +984,3 @@ class VideoService:
 
 # Singleton instance
 video_service = VideoService()
-
