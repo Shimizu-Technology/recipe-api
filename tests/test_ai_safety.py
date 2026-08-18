@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import os
+import signal
 import stat
 
 import pytest
@@ -25,7 +26,7 @@ from app.routers.chat import (
     build_system_prompt,
 )
 from app.routers.health import liveness_check
-from app.services.video import CredentialFile, VideoService
+from app.services.video import CredentialFile, VideoService, _terminate_process
 from app.services.video import settings as video_settings
 
 
@@ -224,8 +225,10 @@ async def test_video_timeout_kills_process_and_cleans_sensitive_temp_files(monke
             return self.returncode
 
     process = FakeProcess()
+    spawn_kwargs = {}
 
     async def fake_create_subprocess_exec(*_args, **_kwargs):
+        spawn_kwargs.update(_kwargs)
         return process
 
     audio_dir = tmp_path / "audio-work"
@@ -252,8 +255,41 @@ async def test_video_timeout_kills_process_and_cleans_sensitive_temp_files(monke
     assert result.error_code == "TIMEOUT"
     assert process.killed is True
     assert process.waited is True
+    assert spawn_kwargs["start_new_session"] is (os.name == "posix")
     assert not credential_path.exists()
     assert not audio_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_media_termination_kills_the_posix_process_group(monkeypatch):
+    if os.name != "posix":
+        pytest.skip("Process groups are a POSIX runtime boundary")
+
+    class FakeProcess:
+        pid = 12_345
+        returncode = None
+        waited = False
+
+        def kill(self):
+            raise AssertionError("POSIX media termination must target the process group")
+
+        async def wait(self):
+            self.waited = True
+            return self.returncode
+
+    process = FakeProcess()
+    killed_groups = []
+
+    def fake_killpg(process_group_id, sig):
+        killed_groups.append((process_group_id, sig))
+        process.returncode = -9
+
+    monkeypatch.setattr("app.services.video.os.killpg", fake_killpg)
+
+    await _terminate_process(process)
+
+    assert killed_groups == [(process.pid, signal.SIGKILL)]
+    assert process.waited is True
 
 
 @pytest.mark.asyncio

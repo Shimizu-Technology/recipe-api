@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -35,7 +36,13 @@ async def _terminate_process(process: asyncio.subprocess.Process | None) -> None
         return
 
     try:
-        process.kill()
+        process_id = getattr(process, "pid", None)
+        if os.name == "posix" and process_id:
+            # Media tools may spawn ffmpeg. Each process is started as its own
+            # session leader, so its PID is also the process-group ID.
+            os.killpg(process_id, signal.SIGKILL)
+        else:
+            process.kill()
     except ProcessLookupError:
         pass
 
@@ -767,7 +774,8 @@ class VideoService:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
             
             stdout, stderr = await asyncio.wait_for(
@@ -877,7 +885,8 @@ class VideoService:
                 "-of", "csv=p=0",
                 file_path,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
             if stdout:
@@ -927,7 +936,8 @@ class VideoService:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
             
             stdout, stderr = await asyncio.wait_for(
