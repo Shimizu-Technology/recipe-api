@@ -307,6 +307,7 @@ Current production-required migration:
 
 See `docs/PRODUCTION_EXTRACTION_MIGRATION_015_RUNBOOK.md` for the production extraction failure/runbook.
 See `docs/CLERK_PROD_CUTOVER_RUNBOOK.md` for the Clerk production cutover runbook.
+See `docs/DURABLE_EXTRACTION_QUEUE_RUNBOOK.md` for queue states, migration 017 rollout, rollback, and incident recovery.
 
 ## Deployment (Render)
 
