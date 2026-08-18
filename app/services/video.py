@@ -29,6 +29,22 @@ def _redact_sensitive_values(text: str) -> str:
     return redacted
 
 
+async def _terminate_process(process: asyncio.subprocess.Process | None) -> None:
+    """Best-effort termination for timeout, cancellation, and unexpected exits."""
+    if not process or process.returncode is not None:
+        return
+
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
+
+
 # ============================================================
 # Friendly Error Messages for Video Extraction
 # ============================================================
@@ -819,9 +835,7 @@ class VideoService:
             )
             
         except asyncio.TimeoutError:
-            if process and process.returncode is None:
-                process.kill()
-                await process.wait()
+            await _terminate_process(process)
             return AudioExtractionResult(
                 success=False,
                 error=f"Audio download timed out after {settings.video_download_timeout_seconds} seconds",
@@ -846,6 +860,7 @@ class VideoService:
                 friendly_error="An unexpected error occurred. Please try again."
             )
         finally:
+            await _terminate_process(process)
             if credential_file:
                 credential_file.cleanup()
             if not keep_temp_dir:
@@ -868,12 +883,12 @@ class VideoService:
             if stdout:
                 return float(stdout.decode().strip())
         except asyncio.TimeoutError:
-            if process and process.returncode is None:
-                process.kill()
-                await process.wait()
+            await _terminate_process(process)
             print("⚠️ ffprobe timed out")
         except Exception as e:
             print(f"⚠️ Could not get audio duration: {e}")
+        finally:
+            await _terminate_process(process)
         return None
     
     async def get_video_metadata_ytdlp(self, url: str) -> VideoMetadata:
@@ -931,13 +946,12 @@ class VideoService:
                     uploader=data.get("uploader", "")
                 )
         except asyncio.TimeoutError:
-            if process and process.returncode is None:
-                process.kill()
-                await process.wait()
+            await _terminate_process(process)
             print("⚠️ yt-dlp metadata extraction timed out")
         except Exception as e:
             print(f"⚠️ yt-dlp metadata extraction failed: {e}")
         finally:
+            await _terminate_process(process)
             if credential_file:
                 credential_file.cleanup()
         

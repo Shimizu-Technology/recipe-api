@@ -254,3 +254,62 @@ async def test_video_timeout_kills_process_and_cleans_sensitive_temp_files(monke
     assert process.waited is True
     assert not credential_path.exists()
     assert not audio_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_video_task_cancellation_terminates_process_before_cleanup(monkeypatch, tmp_path):
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self.started = asyncio.Event()
+            self.killed = False
+            self.waited = False
+
+        async def communicate(self):
+            self.started.set()
+            await asyncio.Event().wait()
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            self.waited = True
+            return self.returncode
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    audio_dir = tmp_path / "cancelled-audio-work"
+    audio_dir.mkdir()
+    credential_path = tmp_path / "cancelled-instagram.cookies.txt"
+    credential_path.write_text("synthetic credentials", encoding="utf-8")
+
+    monkeypatch.setattr("app.services.video.tempfile.mkdtemp", lambda **_kwargs: str(audio_dir))
+    monkeypatch.setattr(
+        "app.services.video.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    service = VideoService()
+    monkeypatch.setattr(
+        service,
+        "_create_instagram_cookies_file",
+        lambda: CredentialFile(path=str(credential_path), temporary=True),
+    )
+
+    task = asyncio.create_task(
+        service.download_audio("https://www.instagram.com/reel/synthetic/")
+    )
+    await process.started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.killed is True
+    assert process.waited is True
+    assert not credential_path.exists()
+    assert not audio_dir.exists()
