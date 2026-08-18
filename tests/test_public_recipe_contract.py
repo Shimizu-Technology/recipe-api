@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from app.config import get_settings
-from app.services.public_identity import public_contributor_id, visible_recipe_user_id
+from app.public_identity import public_contributor_id, visible_recipe_user_id
 
 if TYPE_CHECKING:
     from app.models.recipe import Recipe

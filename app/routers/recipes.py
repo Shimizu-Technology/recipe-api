@@ -25,7 +25,7 @@ from app.models.schemas import (
     RecipeListItem,
     RecipeResponse,
 )
-from app.services.public_identity import public_contributor_id, visible_recipe_user_id
+from app.public_identity import public_contributor_id, visible_recipe_user_id
 from app.services.storage import storage_service
 
 
