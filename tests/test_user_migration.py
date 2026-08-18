@@ -49,3 +49,19 @@ def test_migration_email_hash_returns_none_when_disabled(monkeypatch):
     user_migration = importlib.reload(user_migration)
 
     assert user_migration.migration_email_hash("person@example.com") is None
+
+
+def test_merge_recipe_note_text_preserves_distinct_notes(monkeypatch):
+    user_migration = _reload_user_migration(monkeypatch)
+
+    assert user_migration.merge_recipe_note_text("Production note", "Legacy note") == (
+        "Production note\n\n---\n\nLegacy note"
+    )
+
+
+def test_merge_recipe_note_text_avoids_empty_or_duplicate_content(monkeypatch):
+    user_migration = _reload_user_migration(monkeypatch)
+
+    assert user_migration.merge_recipe_note_text("Production note", "   ") == "Production note"
+    assert user_migration.merge_recipe_note_text("  ", "Legacy note") == "Legacy note"
+    assert user_migration.merge_recipe_note_text("Same note", "Same note") == "Same note"

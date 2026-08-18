@@ -65,6 +65,17 @@ def migration_email_hash(email: str) -> str | None:
     return hash_email(email, secret)
 
 
+def merge_recipe_note_text(current_text: str, legacy_text: str) -> str:
+    """Preserve distinct note content when two Clerk identities collide."""
+    if not legacy_text.strip():
+        return current_text
+    if not current_text.strip():
+        return legacy_text
+    if current_text == legacy_text:
+        return current_text
+    return f"{current_text}\n\n---\n\n{legacy_text}"
+
+
 async def migrate_legacy_user_data(
     db: AsyncSession,
     *,
@@ -196,6 +207,42 @@ async def migrate_legacy_user_data(
             {"legacy_user_id": legacy_user_id, "new_user_id": new_user_id},
         )
     ).rowcount or 0
+
+    # A user may have written notes under both Clerk identities. Preserve both
+    # values in the surviving production-identity row before removing the
+    # duplicate that would violate UNIQUE(user_id, recipe_id).
+    note_collisions = (
+        await db.execute(
+            text("""
+                SELECT new.id, new.note_text AS current_text,
+                       old.note_text AS legacy_text,
+                       old.updated_at AS legacy_updated_at
+                FROM recipe_notes AS old
+                JOIN recipe_notes AS new ON new.recipe_id = old.recipe_id
+                WHERE old.user_id = :legacy_user_id
+                  AND new.user_id = :new_user_id
+            """),
+            {"legacy_user_id": legacy_user_id, "new_user_id": new_user_id},
+        )
+    ).mappings().all()
+
+    for collision in note_collisions:
+        await db.execute(
+            text("""
+                UPDATE recipe_notes
+                SET note_text = :note_text,
+                    updated_at = GREATEST(updated_at, :legacy_updated_at)
+                WHERE id = :note_id
+            """),
+            {
+                "note_id": collision["id"],
+                "note_text": merge_recipe_note_text(
+                    collision["current_text"], collision["legacy_text"]
+                ),
+                "legacy_updated_at": collision["legacy_updated_at"],
+            },
+        )
+    rows_updated["recipe_note_duplicates_merged"] = len(note_collisions)
 
     rows_updated["recipe_note_duplicates_deleted"] = (
         await db.execute(
