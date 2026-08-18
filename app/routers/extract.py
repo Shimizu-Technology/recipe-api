@@ -255,7 +255,7 @@ class ExtractRequest(BaseModel):
     location: str = "Guam"
     notes: str = ""
     quick_check: bool = False  # If true, only check for existing
-    is_public: bool = True  # Public by default - shared to library
+    is_public: bool = False  # Private unless the user explicitly publishes it
 
 
 class ExtractResponse(BaseModel):
@@ -408,7 +408,7 @@ async def extract_recipe(
         has_audio_transcript=extraction_result.has_audio_transcript,
         user_id=user.id,  # Assign to current user
         extractor_display_name=user.display_name,  # Store display name for attribution
-        is_public=request.is_public,  # Public by default, user can opt out
+        is_public=request.is_public,
         total_minutes=_compute_total_minutes(extraction_result.recipe),
     )
     
@@ -548,7 +548,7 @@ async def run_extraction_job(
     notes: str,
     user_id: str,  # User ID for the recipe
     user_display_name: str = "A chef",  # Display name for attribution
-    is_public: bool = True  # Public by default
+    is_public: bool = False  # Private unless the user explicitly publishes it
 ):
     """Background task to run extraction."""
     from app.db.database import AsyncSessionLocal
@@ -648,7 +648,7 @@ async def run_extraction_job(
                     has_audio_transcript=result.has_audio_transcript,
                     user_id=user_id,  # Assign to user
                     extractor_display_name=user_display_name,  # Store display name
-                    is_public=is_public,  # Public by default, user can opt out
+                    is_public=is_public,
                     total_minutes=_compute_total_minutes(extracted_data),
                 )
                 db.add(new_recipe)

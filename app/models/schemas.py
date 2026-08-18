@@ -121,6 +121,8 @@ class RecipeResponse(BaseModel):
     has_audio_transcript: bool = False
     created_at: datetime
     user_id: Optional[str] = None
+    contributor_id: Optional[str] = None
+    is_owner: bool = False
     extractor_display_name: Optional[str] = None
     is_public: bool = False
     
@@ -143,6 +145,8 @@ class RecipeListItem(BaseModel):
     total_time: Optional[str] = None
     created_at: datetime
     user_id: Optional[str] = None
+    contributor_id: Optional[str] = None
+    is_owner: bool = False
     is_public: bool = False
     extractor_display_name: Optional[str] = None  # For attribution on Discover
     
@@ -229,4 +233,3 @@ class PaginatedResponse(BaseModel):
     page: int
     per_page: int
     has_more: bool
-

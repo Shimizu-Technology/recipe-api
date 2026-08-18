@@ -175,6 +175,15 @@ app/
 | DELETE | `/api/recipes/{id}/save` | Remove bookmark |
 | POST | `/api/recipes/{id}/restore` | Restore original version |
 
+New recipes are private by default across extraction, OCR, and manual creation.
+Publishing is an explicit user action through the share controls. Public recipe
+responses expose a stable `contributor_id` (`chef_...`) and `is_owner` instead
+of exposing another user's Clerk subject. The legacy `user_id` field remains
+temporarily available for client compatibility, but contains the opaque public
+contributor ID unless the authenticated viewer owns the recipe. Public detail
+responses also omit extraction source text; owners still receive their own
+source text for editing and diagnostics.
+
 ### Personal Notes
 | Method | Endpoint | Description |
 |--------|----------|-------------|

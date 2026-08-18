@@ -25,6 +25,7 @@ from app.models.schemas import (
     RecipeListItem,
     RecipeResponse,
 )
+from app.services.public_identity import public_contributor_id, visible_recipe_user_id
 from app.services.storage import storage_service
 
 
@@ -363,12 +364,15 @@ class ManualRecipeCreate(BaseModel):
     steps: List[str]
     notes: Optional[str] = None
     tags: Optional[List[str]] = None
-    is_public: bool = True
+    is_public: bool = False
     nutrition: Optional[ManualNutrition] = None
     source_type: Optional[str] = "manual"  # Can be "manual" or "photo" (for edited OCR)
 
 
-def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
+def recipe_to_list_item(
+    recipe: Recipe,
+    viewer_user_id: str | None = None,
+) -> RecipeListItem:
     """Convert Recipe model to RecipeListItem schema."""
     extracted = recipe.extracted or {}
     times = extracted.get("times") or {}
@@ -387,9 +391,56 @@ def recipe_to_list_item(recipe: Recipe) -> RecipeListItem:
         total_time=times.get("total"),
         created_at=recipe.created_at,
         is_public=recipe.is_public,
-        user_id=recipe.user_id,
+        user_id=visible_recipe_user_id(recipe.user_id, viewer_user_id),
+        contributor_id=public_contributor_id(recipe.user_id),
+        is_owner=bool(recipe.user_id and recipe.user_id == viewer_user_id),
         extractor_display_name=recipe.extractor_display_name,
     )
+
+
+def recipe_to_detail_response(
+    recipe: Recipe,
+    viewer_user_id: str | None,
+) -> RecipeResponse:
+    """Shape a recipe for its viewer without leaking public-only internals."""
+    normalized_recipe = normalize_recipe_data(recipe)
+    is_owner = bool(recipe.user_id and recipe.user_id == viewer_user_id)
+    response = RecipeResponse.model_validate(normalized_recipe)
+
+    return response.model_copy(
+        update={
+            # Extraction source text may include captions, OCR, author metadata,
+            # or user-provided context. It is an owner/debug field, not part of
+            # the public recipe contract.
+            "raw_text": response.raw_text if is_owner else None,
+            "user_id": visible_recipe_user_id(recipe.user_id, viewer_user_id),
+            "contributor_id": public_contributor_id(recipe.user_id),
+            "is_owner": is_owner,
+        }
+    )
+
+
+async def resolve_public_contributor_filter(
+    db: AsyncSession,
+    contributor_id: str,
+    viewer_user_id: str | None,
+) -> str:
+    """Resolve an opaque public contributor ID to an internal query subject."""
+    if viewer_user_id and contributor_id == viewer_user_id:
+        return viewer_user_id
+
+    result = await db.execute(
+        select(Recipe.user_id)
+        .where(Recipe.is_public.is_(True), Recipe.user_id.isnot(None))
+        .distinct()
+    )
+    for candidate_user_id in result.scalars().all():
+        if public_contributor_id(candidate_user_id) == contributor_id:
+            return candidate_user_id
+
+    # Clerk subjects never use this prefix. Returning a sentinel lets callers
+    # keep a single SQL query that safely produces zero results.
+    return "__no_public_contributor_match__"
 
 
 @router.post("/manual", response_model=RecipeResponse)
@@ -518,13 +569,13 @@ async def create_manual_recipe(
             print(f"⚠️ Failed to upload image: {e}")
             # Recipe is still created, just without an image
 
-    return new_recipe
+    return recipe_to_detail_response(new_recipe, user.id)
 
 
 class OCRRecipeCreate(BaseModel):
     """Request to save an OCR-extracted recipe."""
     extracted: dict  # The full extracted JSON from OCR
-    is_public: bool = True
+    is_public: bool = False
 
 
 @router.post("/from-ocr", response_model=RecipeResponse)
@@ -566,7 +617,7 @@ async def save_ocr_recipe(
 
     print(f"✅ OCR recipe saved: {extracted.get('title', 'Untitled')} (ID: {new_recipe.id})")
 
-    return new_recipe
+    return recipe_to_detail_response(new_recipe, user.id)
 
 
 @router.get("/", response_model=PaginatedRecipes)
@@ -598,7 +649,7 @@ async def get_my_recipes(
     )
     recipes = result.scalars().all()
 
-    items = [recipe_to_list_item(r) for r in recipes]
+    items = [recipe_to_list_item(r, user.id) for r in recipes]
     has_more = offset + len(items) < total_count
 
     return PaginatedRecipes(
@@ -616,7 +667,7 @@ async def get_public_recipes(
     offset: int = Query(default=0, ge=0, description="Number of recipes to skip"),
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram"),
     sort: str = Query(default="recent", description="Sort order: recent, random, or popular"),
-    extractor_id: Optional[str] = Query(default=None, description="Filter by extractor user ID"),
+    extractor_id: Optional[str] = Query(default=None, description="Filter by public contributor ID"),
     meal_type: Optional[str] = Query(default=None, description="Filter by meal type: breakfast, lunch, dinner, snack, dessert"),
     db: AsyncSession = Depends(get_db),
     user: Optional[ClerkUser] = Depends(get_optional_user),
@@ -636,9 +687,12 @@ async def get_public_recipes(
     """
     base_query = select(Recipe).where(Recipe.is_public.is_(True))
 
-    # Filter by extractor user ID if provided
+    # Filter by opaque public contributor ID if provided.
     if extractor_id:
-        base_query = base_query.where(Recipe.user_id == extractor_id)
+        resolved_extractor_id = await resolve_public_contributor_filter(
+            db, extractor_id, user.id if user else None
+        )
+        base_query = base_query.where(Recipe.user_id == resolved_extractor_id)
 
     # Apply source_type filter if provided
     if source_type and source_type != 'all':
@@ -682,7 +736,7 @@ async def get_public_recipes(
     )
     recipes = result.scalars().all()
 
-    items = [recipe_to_list_item(r) for r in recipes]
+    items = [recipe_to_list_item(r, user.id if user else None) for r in recipes]
     has_more = offset + len(items) < total_count
 
     return PaginatedRecipes(
@@ -888,7 +942,7 @@ async def search_recipes(
     )
     recipes = list(result.scalars().all())
 
-    items = [recipe_to_list_item(r) for r in recipes]
+    items = [recipe_to_list_item(r, user.id) for r in recipes]
     has_more = offset + len(items) < total_count
 
     return PaginatedRecipes(
@@ -1021,7 +1075,7 @@ async def search_by_ingredients(
             match_percentage = (match_count / total_ingredients) * 100 if total_ingredients > 0 else 0
 
             results.append(IngredientMatchResult(
-                recipe=recipe_to_list_item(recipe),
+                recipe=recipe_to_list_item(recipe, user.id),
                 matched_ingredients=matched,
                 total_ingredients=total_ingredients,
                 match_count=match_count,
@@ -1050,9 +1104,10 @@ async def search_public_recipes(
     source_type: Optional[str] = Query(default=None, description="Filter by source: tiktok, youtube, instagram, manual"),
     time_filter: Optional[str] = Query(default=None, description="Filter by time: quick (<30min), medium (30-60min), long (60min+)"),
     tags: Optional[str] = Query(default=None, description="Comma-separated tags to filter by"),
-    extractor_id: Optional[str] = Query(default=None, description="Filter by extractor user ID"),
+    extractor_id: Optional[str] = Query(default=None, description="Filter by public contributor ID"),
     meal_type: Optional[str] = Query(default=None, description="Filter by meal type: breakfast, lunch, dinner, snack, dessert"),
     db: AsyncSession = Depends(get_db),
+    user: Optional[ClerkUser] = Depends(get_optional_user),
 ):
     """
     Search and filter public recipes with pagination.
@@ -1063,9 +1118,12 @@ async def search_public_recipes(
     # Start with base query
     base_query = select(Recipe).where(Recipe.is_public.is_(True))
 
-    # Filter by extractor user ID if provided
+    # Filter by opaque public contributor ID if provided.
     if extractor_id:
-        base_query = base_query.where(Recipe.user_id == extractor_id)
+        resolved_extractor_id = await resolve_public_contributor_filter(
+            db, extractor_id, user.id if user else None
+        )
+        base_query = base_query.where(Recipe.user_id == resolved_extractor_id)
 
     # Apply meal_type filter if provided (search in JSONB array)
     if meal_type and meal_type != 'all':
@@ -1120,7 +1178,7 @@ async def search_public_recipes(
     )
     recipes = list(result.scalars().all())
 
-    items = [recipe_to_list_item(r) for r in recipes]
+    items = [recipe_to_list_item(r, user.id if user else None) for r in recipes]
     has_more = offset + len(items) < total_count
 
     return PaginatedRecipes(
@@ -1179,7 +1237,7 @@ async def get_top_contributors(
 ):
     """
     Get top contributors who have shared the most public recipes.
-    Returns user IDs, display names, and recipe counts.
+    Returns opaque public IDs, display names, and recipe counts.
     """
     # Query to get user_id, count of public recipes, and extract display info from first recipe
 
@@ -1205,7 +1263,10 @@ async def get_top_contributors(
         user_id, recipe_count, display_name = row
         if user_id and recipe_count > 0:
             contributors.append({
-                "user_id": user_id,
+                # Keep the legacy key for currently shipped clients, but its
+                # value is now a public contributor ID rather than a Clerk ID.
+                "user_id": public_contributor_id(user_id),
+                "contributor_id": public_contributor_id(user_id),
                 "display_name": display_name or "Anonymous Chef",
                 "recipe_count": recipe_count,
             })
@@ -1291,28 +1352,7 @@ async def get_similar_recipes(
         scored_recipes.sort(key=lambda x: x[0], reverse=True)
         similar_recipes = [r for _, r in scored_recipes[:limit]]
 
-    # Convert to RecipeListItem format
-    items = []
-    for recipe in similar_recipes:
-        recipe = normalize_recipe_data(recipe)
-        extracted = recipe.extracted or {}
-        items.append(RecipeListItem(
-            id=str(recipe.id),
-            title=extracted.get("title", "Untitled Recipe"),
-            source_url=recipe.source_url or "",
-            thumbnail_url=recipe.thumbnail_url,
-            source_type=recipe.source_type or "manual",
-            total_time=extracted.get("times", {}).get("total"),
-            servings=extracted.get("servings"),
-            tags=extracted.get("tags", []),
-            is_public=recipe.is_public,
-            user_id=recipe.user_id,
-            created_at=recipe.created_at,
-            extractor_display_name=recipe.extractor_display_name,
-            meal_types=extracted.get("mealTypes", []),
-        ))
-
-    return items
+    return [recipe_to_list_item(recipe, user.id if user else None) for recipe in similar_recipes]
 
 
 @router.get("/recent", response_model=list[RecipeListItem])
@@ -1330,7 +1370,7 @@ async def get_recent_recipes(
     )
     recipes = result.scalars().all()
 
-    return [recipe_to_list_item(r) for r in recipes]
+    return [recipe_to_list_item(r, user.id) for r in recipes]
 
 
 @router.get("/check-duplicate")
@@ -1442,7 +1482,7 @@ async def get_recipe(
             raise HTTPException(status_code=403, detail="Access denied")
 
     # Normalize recipe data to ensure valid structure
-    return normalize_recipe_data(recipe)
+    return recipe_to_detail_response(recipe, user.id if user else None)
 
 
 @router.put("/{recipe_id}", response_model=RecipeResponse)
@@ -1490,7 +1530,7 @@ async def update_recipe(
     await db.commit()
     await db.refresh(recipe)
 
-    return recipe
+    return recipe_to_detail_response(recipe, user.id)
 
 
 @router.post("/{recipe_id}/share")
@@ -1681,7 +1721,7 @@ async def edit_recipe(
     await db.commit()
     await db.refresh(recipe)
 
-    return recipe
+    return recipe_to_detail_response(recipe, user.id)
 
 
 @router.post("/{recipe_id}/edit", response_model=RecipeResponse)
@@ -1807,7 +1847,7 @@ async def edit_recipe_with_image(
     await db.commit()
     await db.refresh(recipe)
 
-    return recipe
+    return recipe_to_detail_response(recipe, user.id)
 
 
 @router.post("/{recipe_id}/restore", response_model=RecipeResponse)
@@ -1847,7 +1887,7 @@ async def restore_original_recipe(
     await db.commit()
     await db.refresh(recipe)
 
-    return recipe
+    return recipe_to_detail_response(recipe, user.id)
 
 
 @router.get("/{recipe_id}/has-original")
@@ -2000,7 +2040,7 @@ async def get_saved_recipes(
     )
     recipes = result.scalars().all()
 
-    items = [recipe_to_list_item(recipe) for recipe in recipes]
+    items = [recipe_to_list_item(recipe, user.id) for recipe in recipes]
     has_more = offset + len(items) < total_count
 
     return PaginatedRecipes(
@@ -2163,7 +2203,7 @@ async def re_extract_recipe(
         await db.commit()
         await db.refresh(recipe)
 
-        return recipe
+        return recipe_to_detail_response(recipe, user.id)
 
     except HTTPException:
         raise
@@ -2509,4 +2549,4 @@ async def restore_recipe_version(
     await db.commit()
     await db.refresh(recipe)
 
-    return recipe
+    return recipe_to_detail_response(recipe, user.id)
