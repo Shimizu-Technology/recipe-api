@@ -967,7 +967,9 @@ async def cancel_job(
     and avoid saving the recipe if cancelled.
     """
     result = await db.execute(
-        select(ExtractionJob).where(ExtractionJob.id == job_id)
+        select(ExtractionJob)
+        .where(ExtractionJob.id == job_id)
+        .with_for_update()
     )
     job = result.scalar_one_or_none()
     
