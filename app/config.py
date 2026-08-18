@@ -26,9 +26,12 @@ class Settings(BaseSettings):
     
     # Clerk Auth
     clerk_secret_key: str | None = None
+    clerk_secret_keys_by_issuer: str | None = None
     clerk_frontend_api: str = "clerk.your-domain.com"  # e.g., "prepared-mole-42.clerk.accounts.dev"
     clerk_jwt_issuer: str | None = None
+    clerk_jwt_issuers: str | None = None
     clerk_jwt_audience: str | None = None
+    clerk_migration_email_hash_secret: str | None = None
     
     # AWS S3 (for thumbnail storage)
     aws_access_key_id: str | None = None
@@ -80,9 +83,61 @@ class Settings(BaseSettings):
         return f"https://{frontend_api}"
 
     @property
+    def clerk_issuers(self) -> list[str]:
+        """Allowed Clerk JWT issuers.
+
+        During the Clerk production cutover, production temporarily accepts both
+        the old Clerk development issuer and the new Clerk production issuer so
+        existing App Store builds keep working while the new build rolls out.
+        """
+        if self.clerk_jwt_issuers:
+            return [
+                issuer.strip().rstrip("/")
+                for issuer in self.clerk_jwt_issuers.split(",")
+                if issuer.strip()
+            ]
+        return [self.clerk_issuer]
+
+    @property
     def jwks_url(self) -> str:
-        """Clerk JWKS endpoint."""
+        """Primary Clerk JWKS endpoint."""
         return f"{self.clerk_issuer}/.well-known/jwks.json"
+
+    def jwks_url_for_issuer(self, issuer: str) -> str:
+        """Clerk JWKS endpoint for a specific issuer."""
+        return f"{issuer.rstrip('/')}/.well-known/jwks.json"
+
+    @property
+    def clerk_secret_key_by_issuer(self) -> dict[str, str]:
+        """Map Clerk issuer URLs to Backend API secret keys.
+
+        Format:
+        CLERK_SECRET_KEYS_BY_ISSUER=https://old=sk_test_x,https://new=sk_live_y
+
+        Use this during the Clerk production cutover so account deletion and
+        email fallback call the matching Clerk instance for the verified token.
+        """
+        if not self.clerk_secret_keys_by_issuer:
+            return {}
+
+        mapping: dict[str, str] = {}
+        for pair in self.clerk_secret_keys_by_issuer.split(","):
+            if not pair.strip() or "=" not in pair:
+                continue
+            issuer, secret = pair.split("=", 1)
+            issuer = issuer.strip().rstrip("/")
+            secret = secret.strip()
+            if issuer and secret:
+                mapping[issuer] = secret
+        return mapping
+
+    def clerk_secret_key_for_issuer(self, issuer: str | None) -> str | None:
+        """Return the Clerk secret key for a token issuer."""
+        if issuer:
+            issuer_secret = self.clerk_secret_key_by_issuer.get(issuer.rstrip("/"))
+            if issuer_secret:
+                return issuer_secret
+        return self.clerk_secret_key
 
     @property
     def allowed_cors_origins(self) -> list[str]:
