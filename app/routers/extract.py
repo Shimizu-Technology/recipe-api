@@ -56,7 +56,33 @@ def _validate_idempotent_job(
     target_recipe_id: UUID | None = None,
 ) -> None:
     """Reject reuse of an idempotency key for a different operation."""
-    matches = (
+    if not _job_payload_matches(
+        job,
+        job_kind=job_kind,
+        url=url,
+        location=location,
+        notes=notes,
+        is_public=is_public,
+        target_recipe_id=target_recipe_id,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency-Key was already used for a different request",
+        )
+
+
+def _job_payload_matches(
+    job: ExtractionJob,
+    *,
+    job_kind: str,
+    url: str,
+    location: str,
+    notes: str,
+    is_public: bool,
+    target_recipe_id: UUID | None = None,
+) -> bool:
+    """Compare the persisted request fields that affect extraction output."""
+    return (
         job.job_kind == job_kind
         and job.url == url
         and job.location == location
@@ -64,10 +90,33 @@ def _validate_idempotent_job(
         and job.requested_is_public == is_public
         and job.target_recipe_id == target_recipe_id
     )
-    if not matches:
+
+
+def _require_matching_active_job(
+    job: ExtractionJob,
+    *,
+    job_kind: str,
+    url: str,
+    location: str,
+    notes: str,
+    is_public: bool,
+    target_recipe_id: UUID | None = None,
+) -> None:
+    if not _job_payload_matches(
+        job,
+        job_kind=job_kind,
+        url=url,
+        location=location,
+        notes=notes,
+        is_public=is_public,
+        target_recipe_id=target_recipe_id,
+    ):
         raise HTTPException(
             status_code=409,
-            detail="Idempotency-Key was already used for a different request",
+            detail=(
+                "An extraction for this source is already running with different options. "
+                "Cancel it before starting another."
+            ),
         )
 
 
@@ -569,6 +618,14 @@ async def start_extraction_job(
     
     if existing_job:
         if existing_job.status in ACTIVE_JOB_STATUSES:
+            _require_matching_active_job(
+                existing_job,
+                job_kind="extract",
+                url=url,
+                location=request.location,
+                notes=request.notes,
+                is_public=request.is_public,
+            )
             return {
                 "job_id": str(existing_job.id),
                 "status": existing_job.status,
@@ -642,6 +699,14 @@ async def start_extraction_job(
         raced_job = race_result.scalar_one_or_none()
         if not raced_job:
             raise
+        _require_matching_active_job(
+            raced_job,
+            job_kind="extract",
+            url=url,
+            location=request.location,
+            notes=request.notes,
+            is_public=request.is_public,
+        )
         return {
             "job_id": str(raced_job.id),
             "status": raced_job.status,
@@ -1102,6 +1167,15 @@ async def start_re_extraction_job(
     
     if existing_job:
         if existing_job.status in ACTIVE_JOB_STATUSES:
+            _require_matching_active_job(
+                existing_job,
+                job_kind="reextract",
+                url=recipe.source_url,
+                location=request.location,
+                notes="",
+                is_public=recipe.is_public,
+                target_recipe_id=recipe_id,
+            )
             return {
                 "job_id": str(existing_job.id),
                 "status": existing_job.status,
@@ -1174,6 +1248,15 @@ async def start_re_extraction_job(
         raced_job = race_result.scalar_one_or_none()
         if not raced_job:
             raise
+        _require_matching_active_job(
+            raced_job,
+            job_kind="reextract",
+            url=recipe.source_url,
+            location=request.location,
+            notes="",
+            is_public=recipe.is_public,
+            target_recipe_id=recipe_id,
+        )
         return {
             "job_id": str(raced_job.id),
             "status": raced_job.status,

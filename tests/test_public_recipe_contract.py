@@ -139,3 +139,31 @@ def test_blank_idempotency_key_is_rejected(monkeypatch):
     with pytest.raises(HTTPException) as invalid:
         extract._normalized_idempotency_key("   ")
     assert invalid.value.status_code == 400
+
+
+def test_active_job_deduplication_rejects_changed_options(monkeypatch):
+    extract, _ = _load_recipe_routers(monkeypatch)
+    from app.models.recipe import ExtractionJob
+
+    job = ExtractionJob(
+        id=uuid4(),
+        url="https://example.com/recipe",
+        user_id="user_test",
+        location="Guam",
+        notes="original",
+        status="processing",
+        job_kind="extract",
+        requested_is_public=False,
+    )
+
+    with pytest.raises(HTTPException) as conflict:
+        extract._require_matching_active_job(
+            job,
+            job_kind="extract",
+            url=job.url,
+            location="Guam",
+            notes="changed",
+            is_public=True,
+        )
+    assert conflict.value.status_code == 409
+    assert "different options" in conflict.value.detail

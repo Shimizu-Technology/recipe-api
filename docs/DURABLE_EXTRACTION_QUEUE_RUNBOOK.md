@@ -48,6 +48,12 @@ failure from silently losing a user's work.
 
 3. Run the same command once more. The migration is idempotent and the second
    run must also succeed.
+   - Unfinished legacy re-extractions are recoverable because their request
+     fields can be rebuilt from the target recipe.
+   - Unfinished regular legacy extractions are marked failed with
+     `MIGRATION_RETRY_REQUIRED`; their old process never persisted privacy and
+     attribution choices, so users must retry rather than receive a recipe
+     created from guessed values.
 4. Confirm the new columns and indexes:
 
    ```sql

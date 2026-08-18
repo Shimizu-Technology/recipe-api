@@ -10,6 +10,16 @@ from app.db.database import engine
 async def run_migration():
     """Add leasing, retry, expiry, idempotency, and persisted request fields."""
     async with engine.begin() as conn:
+        durable_column_result = await conn.execute(text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'extraction_jobs'
+                  AND column_name = 'lease_token'
+            )
+        """))
+        is_legacy_upgrade = not durable_column_result.scalar_one()
+
         await conn.execute(text("""
             ALTER TABLE extraction_jobs
                 ADD COLUMN IF NOT EXISTS job_kind VARCHAR(16) NOT NULL DEFAULT 'extract',
@@ -30,55 +40,86 @@ async def run_migration():
             ALTER TABLE extraction_jobs ALTER COLUMN status SET DEFAULT 'queued'
         """))
 
-        await conn.execute(text("""
-            UPDATE extraction_jobs
-            SET job_kind = 'reextract',
-                target_recipe_id = SUBSTRING(url FROM 're-extract:([0-9a-fA-F-]{36})')::uuid
-            WHERE url ~ '^re-extract:[0-9a-fA-F-]{36}$'
-        """))
-        await conn.execute(text("""
-            UPDATE extraction_jobs AS job
-            SET url = recipe.source_url,
-                requested_is_public = recipe.is_public,
-                requested_display_name = COALESCE(recipe.extractor_display_name, 'A chef')
-            FROM recipes AS recipe
-            WHERE job.job_kind = 'reextract'
-              AND job.target_recipe_id = recipe.id
-        """))
+        if is_legacy_upgrade:
+            await conn.execute(text("""
+                UPDATE extraction_jobs
+                SET job_kind = 'reextract',
+                    target_recipe_id = SUBSTRING(url FROM 're-extract:([0-9a-fA-F-]{36})')::uuid
+                WHERE url ~ '^re-extract:[0-9a-fA-F-]{36}$'
+            """))
+            await conn.execute(text("""
+                UPDATE extraction_jobs AS job
+                SET url = recipe.source_url,
+                    requested_is_public = recipe.is_public,
+                    requested_display_name = COALESCE(recipe.extractor_display_name, 'A chef')
+                FROM recipes AS recipe
+                WHERE job.job_kind = 'reextract'
+                  AND job.target_recipe_id = recipe.id
+            """))
 
-        # Jobs that were tied to an old web process become recoverable queue work.
-        await conn.execute(text("""
-            UPDATE extraction_jobs
-            SET status = 'queued',
-                current_step = 'queued',
-                message = 'Queued for extraction',
-                lease_token = NULL,
-                leased_until = NULL,
-                next_attempt_at = NOW(),
-                expires_at = COALESCE(expires_at, NOW() + INTERVAL '24 hours')
-            WHERE status IN ('processing', 'pending', 'claimed')
-              AND recipe_id IS NULL
-        """))
+            # A linked recipe proves the legacy process saved successfully.
+            await conn.execute(text("""
+                UPDATE extraction_jobs
+                SET status = 'completed',
+                    progress = 100,
+                    current_step = 'complete',
+                    message = 'Recipe extracted successfully!',
+                    completed_at = COALESCE(completed_at, NOW())
+                WHERE status IN ('processing', 'pending', 'claimed')
+                  AND recipe_id IS NOT NULL
+            """))
 
-        # Keep one active job per user/source before adding the partial invariant.
-        await conn.execute(text("""
-            WITH ranked AS (
-                SELECT id,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY user_id, job_kind, url, target_recipe_id
-                           ORDER BY created_at DESC, id DESC
-                       ) AS row_number
-                FROM extraction_jobs
-                WHERE status IN ('queued', 'claimed', 'processing')
-            )
-            UPDATE extraction_jobs AS job
-            SET status = 'cancelled',
-                current_step = 'cancelled',
-                message = 'Superseded during durable queue migration',
-                completed_at = NOW()
-            FROM ranked
-            WHERE job.id = ranked.id AND ranked.row_number > 1
-        """))
+            # Re-extraction payloads can be reconstructed from the target recipe.
+            await conn.execute(text("""
+                UPDATE extraction_jobs
+                SET status = 'queued',
+                    current_step = 'queued',
+                    message = 'Queued for re-extraction',
+                    lease_token = NULL,
+                    leased_until = NULL,
+                    next_attempt_at = NOW(),
+                    expires_at = COALESCE(expires_at, NOW() + INTERVAL '24 hours')
+                WHERE status IN ('processing', 'pending', 'claimed')
+                  AND recipe_id IS NULL
+                  AND job_kind = 'reextract'
+            """))
+
+            # Regular legacy jobs did not persist visibility/display-name inputs.
+            # Failing them explicitly is safer than creating a recipe with guessed
+            # privacy or attribution; the client can submit a new durable request.
+            await conn.execute(text("""
+                UPDATE extraction_jobs
+                SET status = 'failed',
+                    current_step = 'error',
+                    message = 'Please retry extraction after the queue upgrade',
+                    error_message = 'Please retry extraction after the queue upgrade',
+                    error_code = 'MIGRATION_RETRY_REQUIRED',
+                    completed_at = NOW(),
+                    next_attempt_at = NULL
+                WHERE status IN ('processing', 'pending', 'claimed')
+                  AND recipe_id IS NULL
+                  AND job_kind = 'extract'
+            """))
+
+            # Keep one active job per user/source before adding the partial invariant.
+            await conn.execute(text("""
+                WITH ranked AS (
+                    SELECT id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY user_id, job_kind, url, target_recipe_id
+                               ORDER BY created_at DESC, id DESC
+                           ) AS row_number
+                    FROM extraction_jobs
+                    WHERE status IN ('queued', 'claimed', 'processing')
+                )
+                UPDATE extraction_jobs AS job
+                SET status = 'cancelled',
+                    current_step = 'cancelled',
+                    message = 'Superseded during durable queue migration',
+                    completed_at = NOW()
+                FROM ranked
+                WHERE job.id = ranked.id AND ranked.row_number > 1
+            """))
 
         await conn.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS uq_extraction_jobs_active_user_url
