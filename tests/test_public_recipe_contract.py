@@ -167,3 +167,32 @@ def test_active_job_deduplication_rejects_changed_options(monkeypatch):
         )
     assert conflict.value.status_code == 409
     assert "different options" in conflict.value.detail
+
+
+def test_active_extraction_matching_includes_recipe_attribution(monkeypatch):
+    extract, _ = _load_recipe_routers(monkeypatch)
+    from app.models.recipe import ExtractionJob
+
+    job = ExtractionJob(
+        id=uuid4(),
+        url="https://example.com/recipe",
+        user_id="user_test",
+        location="Guam",
+        notes="",
+        status="processing",
+        job_kind="extract",
+        requested_is_public=False,
+        requested_display_name="Old Name",
+    )
+
+    with pytest.raises(HTTPException) as conflict:
+        extract._require_matching_active_job(
+            job,
+            job_kind="extract",
+            url=job.url,
+            location="Guam",
+            notes="",
+            is_public=False,
+            display_name="New Name",
+        )
+    assert conflict.value.status_code == 409

@@ -53,6 +53,7 @@ def _validate_idempotent_job(
     location: str,
     notes: str,
     is_public: bool,
+    display_name: str | None = None,
     target_recipe_id: UUID | None = None,
 ) -> None:
     """Reject reuse of an idempotency key for a different operation."""
@@ -63,6 +64,7 @@ def _validate_idempotent_job(
         location=location,
         notes=notes,
         is_public=is_public,
+        display_name=display_name,
         target_recipe_id=target_recipe_id,
     ):
         raise HTTPException(
@@ -79,6 +81,7 @@ def _job_payload_matches(
     location: str,
     notes: str,
     is_public: bool,
+    display_name: str | None = None,
     target_recipe_id: UUID | None = None,
 ) -> bool:
     """Compare the persisted request fields that affect extraction output."""
@@ -88,6 +91,7 @@ def _job_payload_matches(
         and job.location == location
         and job.notes == notes
         and job.requested_is_public == is_public
+        and (display_name is None or job.requested_display_name == display_name)
         and job.target_recipe_id == target_recipe_id
     )
 
@@ -100,6 +104,7 @@ def _require_matching_active_job(
     location: str,
     notes: str,
     is_public: bool,
+    display_name: str | None = None,
     target_recipe_id: UUID | None = None,
 ) -> None:
     if not _job_payload_matches(
@@ -109,6 +114,7 @@ def _require_matching_active_job(
         location=location,
         notes=notes,
         is_public=is_public,
+        display_name=display_name,
         target_recipe_id=target_recipe_id,
     ):
         raise HTTPException(
@@ -578,6 +584,7 @@ async def start_extraction_job(
                 location=request.location,
                 notes=request.notes,
                 is_public=request.is_public,
+                display_name=user.display_name,
             )
             return {
                 "job_id": str(idempotent_job.id),
@@ -625,6 +632,7 @@ async def start_extraction_job(
                 location=request.location,
                 notes=request.notes,
                 is_public=request.is_public,
+                display_name=user.display_name,
             )
             return {
                 "job_id": str(existing_job.id),
@@ -676,6 +684,7 @@ async def start_extraction_job(
                     location=request.location,
                     notes=request.notes,
                     is_public=request.is_public,
+                    display_name=user.display_name,
                 )
                 return {
                     "job_id": str(idempotent_job.id),
@@ -706,6 +715,7 @@ async def start_extraction_job(
             location=request.location,
             notes=request.notes,
             is_public=request.is_public,
+            display_name=user.display_name,
         )
         return {
             "job_id": str(raced_job.id),
