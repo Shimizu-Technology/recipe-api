@@ -58,6 +58,7 @@ def apply_claim(job: ExtractionJob, now: datetime) -> None:
     job.leased_until = now + timedelta(seconds=settings.job_lease_seconds)
     job.heartbeat_at = now
     job.attempt_count = (job.attempt_count or 0) + 1
+    job.next_attempt_at = None
     job.updated_at = now
 
 
@@ -79,6 +80,7 @@ def apply_retry_policy(job: ExtractionJob, now: datetime, error_code: str) -> No
         job.current_step = "error"
         job.message = "Extraction failed after multiple attempts"
         job.completed_at = now
+        job.next_attempt_at = None
 
 
 def apply_recovered_completion(job: ExtractionJob, now: datetime) -> None:
@@ -88,6 +90,7 @@ def apply_recovered_completion(job: ExtractionJob, now: datetime) -> None:
     job.current_step = "complete"
     job.message = "Recipe extracted successfully!"
     job.completed_at = now
+    job.next_attempt_at = None
     job.lease_token = None
     job.leased_until = None
     job.updated_at = now
@@ -233,6 +236,7 @@ class DurableJobWorker:
                 job.message = "Extraction failed after multiple attempts"
             job.current_step = "error"
             job.completed_at = now
+            job.next_attempt_at = None
             job.lease_token = None
             job.leased_until = None
             job.updated_at = now

@@ -46,6 +46,7 @@ def test_claim_assigns_unique_lease_and_increments_attempt():
     assert first.lease_token and first.lease_token != second.lease_token
     assert first.leased_until == now + timedelta(seconds=settings.job_lease_seconds)
     assert first.heartbeat_at == now
+    assert first.next_attempt_at is None
 
 
 def test_unexpected_failure_requeues_with_bounded_backoff():
@@ -90,6 +91,7 @@ def test_recipe_link_makes_replay_idempotently_complete():
     assert job.recipe_id is not None
     assert job.lease_token is None
     assert job.completed_at == now
+    assert job.next_attempt_at is None
 
 
 def test_job_state_sets_are_explicit_and_disjoint():

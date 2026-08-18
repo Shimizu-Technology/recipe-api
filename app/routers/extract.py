@@ -985,6 +985,7 @@ async def cancel_job(
     job.current_step = "cancelled"
     job.message = "Extraction cancelled by user"
     job.completed_at = datetime.now(timezone.utc)
+    job.next_attempt_at = None
     job.lease_token = None
     job.leased_until = None
     job.updated_at = datetime.utcnow()
