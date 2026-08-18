@@ -854,6 +854,7 @@ async def run_extraction_job(
                         ExtractionJob.id == job_id,
                         ExtractionJob.lease_token == lease_token,
                     )
+                    .with_for_update()
                     .execution_options(populate_existing=True)
                 )
                 job = terminal_job_result.scalar_one_or_none()
@@ -1352,6 +1353,7 @@ async def run_re_extraction_job(
                         ExtractionJob.id == job_id,
                         ExtractionJob.lease_token == lease_token,
                     )
+                    .with_for_update()
                     .execution_options(populate_existing=True)
                 )
                 job = terminal_job_result.scalar_one_or_none()

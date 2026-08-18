@@ -240,7 +240,11 @@ class DurableJobWorker:
     async def execute_claimed_job(self, job_id: UUID) -> None:
         """Dispatch one claimed job using only its persisted request payload."""
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(ExtractionJob).where(ExtractionJob.id == job_id))
+            result = await db.execute(
+                select(ExtractionJob)
+                .where(ExtractionJob.id == job_id)
+                .with_for_update()
+            )
             job = result.scalar_one_or_none()
             if not job or job.status != "claimed":
                 return
