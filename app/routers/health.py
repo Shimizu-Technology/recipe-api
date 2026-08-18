@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import ClerkUser, get_current_user
 from app.config import get_settings
 from app.db import get_db
+from app.job_worker import job_worker
 from app.models.schemas import DiagnosticResponse, HealthResponse
 
 router = APIRouter(tags=["health"])
@@ -32,8 +33,10 @@ async def dependency_diagnostics(
     try:
         await db.execute(text("SELECT 1"))
         db_status = "connected"
+        job_queue = await job_worker.queue_metrics()
     except Exception:
         db_status = "unavailable"
+        job_queue = {}
 
     dependencies = {
         "database": db_status,
@@ -45,6 +48,7 @@ async def dependency_diagnostics(
         environment=settings.environment,
         dependencies=dependencies,
         disabled_ai_capabilities=sorted(settings.disabled_ai_capability_set),
+        job_queue=job_queue,
     )
 
 

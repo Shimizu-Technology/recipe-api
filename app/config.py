@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     
     # Database
     database_url: str
+    database_use_ssl: bool = True
     
     # OpenAI
     openai_api_key: str
@@ -67,6 +68,13 @@ class Settings(BaseSettings):
     video_metadata_timeout_seconds: int = 30
     video_max_duration_seconds: int = 3_600
     audio_max_bytes: int = 25 * 1024 * 1024
+
+    # Durable database-backed extraction worker
+    job_worker_enabled: bool = True
+    job_worker_poll_seconds: float = 5.0
+    job_lease_seconds: int = 600
+    job_max_attempts: int = 3
+    job_expiry_hours: int = 24
     
     # Sentry error monitoring
     sentry_dsn: str | None = None
@@ -103,6 +111,16 @@ class Settings(BaseSettings):
 
         if self.openai_reasoning_effort not in {"none", "low", "medium", "high", "xhigh"}:
             raise ValueError("OPENAI_REASONING_EFFORT must be none, low, medium, high, or xhigh")
+        if self.job_worker_poll_seconds <= 0:
+            raise ValueError("JOB_WORKER_POLL_SECONDS must be positive")
+        if self.job_lease_seconds < 60:
+            raise ValueError("JOB_LEASE_SECONDS must be at least 60")
+        if self.job_max_attempts < 1:
+            raise ValueError("JOB_MAX_ATTEMPTS must be at least 1")
+        if self.job_expiry_hours < 1:
+            raise ValueError("JOB_EXPIRY_HOURS must be at least 1")
+        if self.environment.lower() != "development" and not self.database_use_ssl:
+            raise ValueError("DATABASE_USE_SSL cannot be disabled outside development")
         return self
 
     @property

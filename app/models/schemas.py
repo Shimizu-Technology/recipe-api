@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ============================================================
 # Nested Types (matching TypeScript interfaces)
@@ -224,6 +224,7 @@ class DiagnosticResponse(BaseModel):
     environment: str
     dependencies: dict[str, str]
     disabled_ai_capabilities: list[str]
+    job_queue: dict[str, int] = Field(default_factory=dict)
 
 
 class ErrorResponse(BaseModel):

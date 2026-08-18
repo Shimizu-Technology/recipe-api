@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from app.config import Settings
 
 
@@ -105,3 +108,21 @@ def test_clerk_secret_key_for_issuer_falls_back_to_default():
     )
 
     assert settings.clerk_secret_key_for_issuer("https://old.clerk.accounts.dev") == "fallback-secret"
+
+
+def test_local_database_can_disable_ssl_but_production_cannot():
+    local = Settings(
+        database_url="postgresql://localhost/hafa_test",
+        database_use_ssl=False,
+        openai_api_key="test-openai-key",
+        environment="development",
+    )
+    assert local.database_use_ssl is False
+
+    with pytest.raises(ValidationError, match="DATABASE_USE_SSL"):
+        Settings(
+            database_url="postgresql://production.example/hafa",
+            database_use_ssl=False,
+            openai_api_key="test-openai-key",
+            environment="production",
+        )
