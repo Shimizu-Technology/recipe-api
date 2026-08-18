@@ -1,10 +1,13 @@
 import importlib
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from app.config import get_settings
-from app.models.recipe import Recipe
 from app.services.public_identity import public_contributor_id, visible_recipe_user_id
+
+if TYPE_CHECKING:
+    from app.models.recipe import Recipe
 
 
 def _load_recipe_routers(monkeypatch):
@@ -18,7 +21,10 @@ def _load_recipe_routers(monkeypatch):
     return importlib.reload(extract), importlib.reload(recipes)
 
 
-def _public_recipe() -> Recipe:
+def _public_recipe() -> "Recipe":
+    # Import only after _load_recipe_routers has installed isolated test settings.
+    from app.models.recipe import Recipe
+
     return Recipe(
         id=uuid4(),
         source_url="https://example.com/recipe",
