@@ -3,6 +3,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import pytest
+from fastapi import HTTPException
+
 from app.config import get_settings
 from app.public_identity import public_contributor_id, visible_recipe_user_id
 
@@ -92,3 +95,104 @@ def test_recipe_creation_defaults_are_private(monkeypatch):
     assert extract.ExtractRequest.model_fields["is_public"].default is False
     assert recipes.ManualRecipeCreate.model_fields["is_public"].default is False
     assert recipes.OCRRecipeCreate.model_fields["is_public"].default is False
+
+
+def test_idempotency_keys_are_payload_scoped(monkeypatch):
+    extract, _ = _load_recipe_routers(monkeypatch)
+    from app.models.recipe import ExtractionJob
+
+    job = ExtractionJob(
+        id=uuid4(),
+        url="https://example.com/recipe",
+        user_id="user_test",
+        location="Guam",
+        notes="family version",
+        status="queued",
+        job_kind="extract",
+        requested_is_public=False,
+    )
+
+    extract._validate_idempotent_job(
+        job,
+        job_kind="extract",
+        url=job.url,
+        location="Guam",
+        notes="family version",
+        is_public=False,
+    )
+
+    with pytest.raises(HTTPException) as conflict:
+        extract._validate_idempotent_job(
+            job,
+            job_kind="extract",
+            url="https://example.com/different",
+            location="Guam",
+            notes="family version",
+            is_public=False,
+        )
+    assert conflict.value.status_code == 409
+
+
+def test_blank_idempotency_key_is_rejected(monkeypatch):
+    extract, _ = _load_recipe_routers(monkeypatch)
+
+    with pytest.raises(HTTPException) as invalid:
+        extract._normalized_idempotency_key("   ")
+    assert invalid.value.status_code == 400
+
+
+def test_active_job_deduplication_rejects_changed_options(monkeypatch):
+    extract, _ = _load_recipe_routers(monkeypatch)
+    from app.models.recipe import ExtractionJob
+
+    job = ExtractionJob(
+        id=uuid4(),
+        url="https://example.com/recipe",
+        user_id="user_test",
+        location="Guam",
+        notes="original",
+        status="processing",
+        job_kind="extract",
+        requested_is_public=False,
+    )
+
+    with pytest.raises(HTTPException) as conflict:
+        extract._require_matching_active_job(
+            job,
+            job_kind="extract",
+            url=job.url,
+            location="Guam",
+            notes="changed",
+            is_public=True,
+        )
+    assert conflict.value.status_code == 409
+    assert "different options" in conflict.value.detail
+
+
+def test_active_extraction_matching_includes_recipe_attribution(monkeypatch):
+    extract, _ = _load_recipe_routers(monkeypatch)
+    from app.models.recipe import ExtractionJob
+
+    job = ExtractionJob(
+        id=uuid4(),
+        url="https://example.com/recipe",
+        user_id="user_test",
+        location="Guam",
+        notes="",
+        status="processing",
+        job_kind="extract",
+        requested_is_public=False,
+        requested_display_name="Old Name",
+    )
+
+    with pytest.raises(HTTPException) as conflict:
+        extract._require_matching_active_job(
+            job,
+            job_kind="extract",
+            url=job.url,
+            location="Guam",
+            notes="",
+            is_public=False,
+            display_name="New Name",
+        )
+    assert conflict.value.status_code == 409

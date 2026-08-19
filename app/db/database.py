@@ -16,7 +16,7 @@ engine = create_async_engine(
     settings.async_database_url,
     echo=settings.environment.lower() == "development",
     pool_pre_ping=True,
-    connect_args={"ssl": ssl_context},
+    connect_args={"ssl": ssl_context} if settings.database_use_ssl else {},
 )
 
 # Session factory
@@ -37,4 +37,3 @@ async def get_db():
             yield session
         finally:
             await session.close()
-

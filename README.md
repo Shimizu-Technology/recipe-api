@@ -120,6 +120,19 @@ User pastes website URL → Fetch HTML → Parse JSON-LD (or AI fallback)
     → Split combined steps → Thumbnail uploaded to S3 → Saved to PostgreSQL
 ```
 
+### Durable async extraction
+
+`POST /api/extract/async` and `POST /api/re-extract/{id}/async` persist the
+complete request before returning. A database-backed worker moves each job
+through `queued → claimed → processing → completed`, using row locks, renewable
+leases, bounded retries, and stale-lease recovery so deploys do not lose work.
+Terminal states are `completed`, `failed`, `cancelled`, and `expired`.
+
+Clients should send a new UUID in the `Idempotency-Key` header for each user
+action, retain the returned job ID, and poll `GET /api/jobs/{id}` until any
+terminal state. Retrying the same request with the same key returns the original
+job; reusing a key for a different payload returns `409`.
+
 Supported sites: AllRecipes, Budget Bytes, Half Baked Harvest, Delish, Pinch of Yum, Sally's Baking, and hundreds more.
 
 **AI Stack:**
@@ -274,12 +287,14 @@ This repo uses simple numbered migration scripts in `migrations/` rather than Al
 
 ```bash
 # Local/dev with uv
-uv run python migrations/015_add_extraction_job_user_id.py
-uv run python migrations/016_add_clerk_user_migration_tables.py
+PYTHONPATH=. uv run python migrations/015_add_extraction_job_user_id.py
+PYTHONPATH=. uv run python migrations/016_add_clerk_user_migration_tables.py
+PYTHONPATH=. uv run python migrations/017_add_durable_extraction_jobs.py
 
 # Render shell/one-off job, using the service's installed environment
 PYTHONPATH=. python migrations/015_add_extraction_job_user_id.py
 PYTHONPATH=. python migrations/016_add_clerk_user_migration_tables.py
+PYTHONPATH=. python migrations/017_add_durable_extraction_jobs.py
 ```
 
 Run migrations intentionally for each environment; do not run production migrations from a local shell unless you have confirmed the target database.
@@ -288,9 +303,11 @@ Current production-required migration:
 
 - `migrations/015_add_extraction_job_user_id.py` — required by `/api/extract/async` because extraction jobs are now user-owned.
 - `migrations/016_add_clerk_user_migration_tables.py` — required before the Clerk production cutover migration bridge can import/link legacy users.
+- `migrations/017_add_durable_extraction_jobs.py` — required before enabling the durable extraction worker. Apply this expand-only, idempotent migration before deploying the worker code, verify `/api/admin/diagnostics` reports queue counts, then deploy with `JOB_WORKER_ENABLED=true`. Roll back the worker by setting `JOB_WORKER_ENABLED=false` and redeploying; the migration and job history can remain in place for a later retry.
 
 See `docs/PRODUCTION_EXTRACTION_MIGRATION_015_RUNBOOK.md` for the production extraction failure/runbook.
 See `docs/CLERK_PROD_CUTOVER_RUNBOOK.md` for the Clerk production cutover runbook.
+See `docs/DURABLE_EXTRACTION_QUEUE_RUNBOOK.md` for queue states, migration 017 rollout, rollback, and incident recovery.
 
 ## Deployment (Render)
 

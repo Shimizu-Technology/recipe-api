@@ -2,19 +2,26 @@
 
 import base64
 import re
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Literal, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.auth import ClerkUser, get_current_user
+from app.config import get_settings
 from app.db import get_db
 from app.image_validation import ImageValidationError, validate_image_bytes
+from app.job_worker import (
+    ACTIVE_JOB_STATUSES,
+    job_worker,
+    should_retry_extraction_error,
+)
 from app.models.recipe import ExtractionJob, Recipe, RecipeVersion
 from app.services import recipe_extractor, storage_service, video_service
 from app.services.extractor import ExtractionProgress
@@ -22,6 +29,101 @@ from app.services.llm_client import llm_service
 
 MAX_OCR_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_OCR_TOTAL_BYTES = 40 * 1024 * 1024
+settings = get_settings()
+
+
+class ExtractionJobCancelled(Exception):
+    """Stop work when the persisted job has reached cancelled state."""
+
+
+def _normalized_idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Idempotency-Key cannot be blank")
+    return normalized
+
+
+def _validate_idempotent_job(
+    job: ExtractionJob,
+    *,
+    job_kind: str,
+    url: str,
+    location: str,
+    notes: str,
+    is_public: bool,
+    display_name: str | None = None,
+    target_recipe_id: UUID | None = None,
+) -> None:
+    """Reject reuse of an idempotency key for a different operation."""
+    if not _job_payload_matches(
+        job,
+        job_kind=job_kind,
+        url=url,
+        location=location,
+        notes=notes,
+        is_public=is_public,
+        display_name=display_name,
+        target_recipe_id=target_recipe_id,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency-Key was already used for a different request",
+        )
+
+
+def _job_payload_matches(
+    job: ExtractionJob,
+    *,
+    job_kind: str,
+    url: str,
+    location: str,
+    notes: str,
+    is_public: bool,
+    display_name: str | None = None,
+    target_recipe_id: UUID | None = None,
+) -> bool:
+    """Compare the persisted request fields that affect extraction output."""
+    return (
+        job.job_kind == job_kind
+        and job.url == url
+        and job.location == location
+        and job.notes == notes
+        and job.requested_is_public == is_public
+        and (display_name is None or job.requested_display_name == display_name)
+        and job.target_recipe_id == target_recipe_id
+    )
+
+
+def _require_matching_active_job(
+    job: ExtractionJob,
+    *,
+    job_kind: str,
+    url: str,
+    location: str,
+    notes: str,
+    is_public: bool,
+    display_name: str | None = None,
+    target_recipe_id: UUID | None = None,
+) -> None:
+    if not _job_payload_matches(
+        job,
+        job_kind=job_kind,
+        url=url,
+        location=location,
+        notes=notes,
+        is_public=is_public,
+        display_name=display_name,
+        target_recipe_id=target_recipe_id,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An extraction for this source is already running with different options. "
+                "Cancel it before starting another."
+            ),
+        )
 
 
 def _parse_time_to_minutes(time_str: str) -> Optional[int]:
@@ -273,19 +375,18 @@ class JobStatusResponse(BaseModel):
     """Status of an extraction job."""
     id: UUID
     url: str
-    status: str  # processing|completed|failed
+    status: Literal["queued", "claimed", "processing", "completed", "failed", "cancelled", "expired"]
     progress: int
     current_step: str
     message: str
     recipe_id: Optional[UUID] = None
     error_message: Optional[str] = None
+    error_code: Optional[str] = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: Optional[datetime] = None
     low_confidence: bool = False  # True if extraction quality is uncertain
     confidence_warning: Optional[str] = None  # Warning message for user
-
-
-# In-memory job storage (for simple implementation)
-# In production, this would use Redis or the database
-_jobs: dict[str, dict] = {}
 
 
 @router.post("/extract", response_model=ExtractResponse)
@@ -445,7 +546,10 @@ async def extract_recipe(
 @router.post("/extract/async")
 async def start_extraction_job(
     request: ExtractRequest,
-    background_tasks: BackgroundTasks,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", min_length=1, max_length=128),
+    ] = None,
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
@@ -458,10 +562,36 @@ async def start_extraction_job(
     from app.services.video import VideoService
     
     original_url = request.url.strip()
+    idempotency_key = _normalized_idempotency_key(idempotency_key)
     
     # Normalize the URL (resolve TikTok short URLs, etc.)
     url = await VideoService.normalize_url(original_url)
     print(f"📎 Normalized URL: {original_url} → {url}")
+
+    if idempotency_key:
+        idempotent_result = await db.execute(
+            select(ExtractionJob).where(
+                ExtractionJob.user_id == user.id,
+                ExtractionJob.idempotency_key == idempotency_key,
+            )
+        )
+        idempotent_job = idempotent_result.scalar_one_or_none()
+        if idempotent_job:
+            _validate_idempotent_job(
+                idempotent_job,
+                job_kind="extract",
+                url=url,
+                location=request.location,
+                notes=request.notes,
+                is_public=request.is_public,
+                display_name=user.display_name,
+            )
+            return {
+                "job_id": str(idempotent_job.id),
+                "status": idempotent_job.status,
+                "recipe_id": str(idempotent_job.recipe_id) if idempotent_job.recipe_id else None,
+                "is_existing": True,
+            }
     
     # Check for existing recipe FROM THIS USER (check both original and normalized)
     result = await db.execute(
@@ -486,6 +616,7 @@ async def start_extraction_job(
         .where(
             or_(ExtractionJob.url == original_url, ExtractionJob.url == url),
             ExtractionJob.user_id == user.id,
+            ExtractionJob.job_kind == "extract",
         )
         .order_by(ExtractionJob.created_at.desc())
         .limit(1)
@@ -493,22 +624,24 @@ async def start_extraction_job(
     existing_job = job_result.scalar_one_or_none()
     
     if existing_job:
-        # If job is still processing, return it
-        if existing_job.status == "processing":
+        if existing_job.status in ACTIVE_JOB_STATUSES:
+            _require_matching_active_job(
+                existing_job,
+                job_kind="extract",
+                url=url,
+                location=request.location,
+                notes=request.notes,
+                is_public=request.is_public,
+                display_name=user.display_name,
+            )
             return {
                 "job_id": str(existing_job.id),
-                "status": "processing",
+                "status": existing_job.status,
                 "message": "Extraction already in progress"
             }
-        
-        # If job is completed but no recipe found (shouldn't happen), or failed, 
-        # delete the old job and create a new one
-        print(f"🗑️ Cleaning up old job {existing_job.id} (status: {existing_job.status})")
-        await db.delete(existing_job)
-        await db.commit()
     
     # Create new job record
-    job_id = str(uuid4())
+    job_id = uuid4()
     
     # Store job in database
     job = ExtractionJob(
@@ -517,31 +650,85 @@ async def start_extraction_job(
         user_id=user.id,
         location=request.location,
         notes=request.notes,
-        status="processing",
+        status="queued",
+        job_kind="extract",
+        requested_is_public=request.is_public,
+        requested_display_name=user.display_name,
+        idempotency_key=idempotency_key,
         progress=0,
-        current_step="initializing",
-        message="Starting extraction..."
+        current_step="queued",
+        message="Queued for extraction",
+        max_attempts=settings.job_max_attempts,
+        next_attempt_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=settings.job_expiry_hours),
     )
-    
-    db.add(job)
-    await db.commit()
-    
-    # Start background task WITH USER ID and display name
-    background_tasks.add_task(
-        run_extraction_job,
-        job_id=job_id,
-        url=url,
-        location=request.location,
-        notes=request.notes,
-        user_id=user.id,  # Pass user ID to background task
-        user_display_name=user.display_name,  # Pass display name for attribution
-        is_public=request.is_public  # Pass public setting
-    )
+
+    try:
+        db.add(job)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        if idempotency_key:
+            idempotent_result = await db.execute(
+                select(ExtractionJob).where(
+                    ExtractionJob.user_id == user.id,
+                    ExtractionJob.idempotency_key == idempotency_key,
+                )
+            )
+            idempotent_job = idempotent_result.scalar_one_or_none()
+            if idempotent_job:
+                _validate_idempotent_job(
+                    idempotent_job,
+                    job_kind="extract",
+                    url=url,
+                    location=request.location,
+                    notes=request.notes,
+                    is_public=request.is_public,
+                    display_name=user.display_name,
+                )
+                return {
+                    "job_id": str(idempotent_job.id),
+                    "status": idempotent_job.status,
+                    "recipe_id": (
+                        str(idempotent_job.recipe_id) if idempotent_job.recipe_id else None
+                    ),
+                    "is_existing": True,
+                }
+        race_result = await db.execute(
+            select(ExtractionJob)
+            .where(
+                ExtractionJob.user_id == user.id,
+                ExtractionJob.url == url,
+                ExtractionJob.job_kind == "extract",
+                ExtractionJob.status.in_(tuple(ACTIVE_JOB_STATUSES)),
+            )
+            .order_by(ExtractionJob.created_at.desc())
+            .limit(1)
+        )
+        raced_job = race_result.scalar_one_or_none()
+        if not raced_job:
+            raise
+        _require_matching_active_job(
+            raced_job,
+            job_kind="extract",
+            url=url,
+            location=request.location,
+            notes=request.notes,
+            is_public=request.is_public,
+            display_name=user.display_name,
+        )
+        return {
+            "job_id": str(raced_job.id),
+            "status": raced_job.status,
+            "message": "Extraction already in progress",
+        }
+
+    job_worker.wake()
     
     return {
-        "job_id": job_id,
-        "status": "processing",
-        "message": "Extraction started"
+        "job_id": str(job_id),
+        "status": "queued",
+        "message": "Extraction queued"
     }
 
 
@@ -552,7 +739,8 @@ async def run_extraction_job(
     notes: str,
     user_id: str,  # User ID for the recipe
     user_display_name: str = "A chef",  # Display name for attribution
-    is_public: bool = False  # Private unless the user explicitly publishes it
+    is_public: bool = False,  # Private unless the user explicitly publishes it
+    lease_token: str | None = None,
 ):
     """Background task to run extraction."""
     from app.db.database import AsyncSessionLocal
@@ -562,15 +750,25 @@ async def run_extraction_job(
             # Update progress callback
             async def update_progress(progress):
                 job_result = await db.execute(
-                    select(ExtractionJob).where(ExtractionJob.id == job_id)
+                    select(ExtractionJob)
+                    .where(
+                        ExtractionJob.id == job_id,
+                        ExtractionJob.lease_token == lease_token,
+                    )
+                    .execution_options(populate_existing=True)
                 )
                 job = job_result.scalar_one_or_none()
-                if job:
-                    job.progress = progress.progress
-                    job.current_step = progress.step
-                    job.message = progress.message
-                    job.updated_at = datetime.utcnow()
-                    await db.commit()
+                if not job or job.status == "cancelled":
+                    raise ExtractionJobCancelled
+                job.progress = progress.progress
+                job.current_step = progress.step
+                job.message = progress.message
+                job.heartbeat_at = datetime.now(timezone.utc)
+                job.leased_until = datetime.now(timezone.utc) + timedelta(
+                    seconds=settings.job_lease_seconds
+                )
+                job.updated_at = datetime.now(timezone.utc)
+                await db.commit()
             
             # Detect platform and run appropriate extraction
             platform = video_service.detect_platform(url)
@@ -602,7 +800,12 @@ async def run_extraction_job(
             
             # Get job record
             job_result = await db.execute(
-                select(ExtractionJob).where(ExtractionJob.id == job_id)
+                select(ExtractionJob)
+                .where(
+                    ExtractionJob.id == job_id,
+                    ExtractionJob.lease_token == lease_token,
+                )
+                .execution_options(populate_existing=True)
             )
             job = job_result.scalar_one_or_none()
             
@@ -621,7 +824,10 @@ async def run_extraction_job(
                 # Use a new query with execution_options to get fresh data from DB
                 fresh_job_result = await db.execute(
                     select(ExtractionJob)
-                    .where(ExtractionJob.id == job_id)
+                    .where(
+                        ExtractionJob.id == job_id,
+                        ExtractionJob.lease_token == lease_token,
+                    )
                     .execution_options(populate_existing=True)
                 )
                 job = fresh_job_result.scalar_one_or_none()
@@ -656,6 +862,11 @@ async def run_extraction_job(
                     total_minutes=_compute_total_minutes(extracted_data),
                 )
                 db.add(new_recipe)
+                await db.flush()
+                # Commit the recipe and durable job link atomically. If the
+                # process exits afterward, stale recovery completes this job
+                # instead of creating a duplicate recipe.
+                job.recipe_id = new_recipe.id
                 await db.commit()
                 await db.refresh(new_recipe)
                 
@@ -669,7 +880,12 @@ async def run_extraction_job(
                 if job and job.status == "cancelled":
                     print(f"🚫 Job {job_id} was cancelled during save - deleting recipe {new_recipe.id}")
                     await db.delete(new_recipe)
+                    job.recipe_id = None
                     await db.commit()
+                    return
+                if not job or job.lease_token != lease_token:
+                    # Another worker owns this lease now. It will observe the
+                    # durable recipe link and complete without duplicating it.
                     return
                 
                 # Upload thumbnail to S3 for permanent storage
@@ -706,7 +922,20 @@ async def run_extraction_job(
                     progress=100,
                     message=completion_msg
                 ))
-                
+
+                terminal_job_result = await db.execute(
+                    select(ExtractionJob)
+                    .where(
+                        ExtractionJob.id == job_id,
+                        ExtractionJob.lease_token == lease_token,
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                job = terminal_job_result.scalar_one_or_none()
+                if not job:
+                    raise ExtractionJobCancelled
+
                 job.status = "completed"
                 job.progress = 100
                 job.current_step = "complete"
@@ -715,31 +944,56 @@ async def run_extraction_job(
                 job.completed_at = datetime.utcnow()
                 job.low_confidence = result.low_confidence
                 job.confidence_warning = result.confidence_warning
+                job.lease_token = None
+                job.leased_until = None
             else:
-                # Update job as failed
-                job.status = "failed"
-                job.current_step = "error"
                 # Use friendly error if available, otherwise raw error
                 friendly_msg = result.friendly_error or result.error or "Extraction failed"
-                job.message = friendly_msg
                 job.error_message = friendly_msg  # Show friendly message to user
+                error_code = result.error_code or "EXTRACTION_FAILED"
+                job.error_code = error_code
+                if should_retry_extraction_error(error_code):
+                    await db.commit()
+                    await job_worker.retry_or_fail(
+                        job_id,
+                        error_code,
+                        expected_lease_token=lease_token,
+                    )
+                    return
+                job.status = "failed"
+                job.current_step = "error"
+                job.message = friendly_msg
+                job.completed_at = datetime.now(timezone.utc)
+                job.lease_token = None
+                job.leased_until = None
             
             job.updated_at = datetime.utcnow()
             await db.commit()
             
-        except Exception as e:
-            print(f"❌ Extraction job {job_id} failed: {e}")
-            # Update job as failed
-            job_result = await db.execute(
-                select(ExtractionJob).where(ExtractionJob.id == job_id)
+        except ExtractionJobCancelled:
+            await db.rollback()
+            cancelled_result = await db.execute(
+                select(ExtractionJob).where(ExtractionJob.id == job_id).with_for_update()
             )
-            job = job_result.scalar_one_or_none()
-            if job:
-                job.status = "failed"
-                job.error_message = str(e)
-                job.message = f"Error: {str(e)}"
-                job.updated_at = datetime.utcnow()
+            cancelled_job = cancelled_result.scalar_one_or_none()
+            if cancelled_job and cancelled_job.status == "cancelled" and cancelled_job.recipe_id:
+                recipe_result = await db.execute(
+                    select(Recipe).where(Recipe.id == cancelled_job.recipe_id)
+                )
+                cancelled_recipe = recipe_result.scalar_one_or_none()
+                cancelled_job.recipe_id = None
+                await db.flush()
+                if cancelled_recipe:
+                    await db.delete(cancelled_recipe)
                 await db.commit()
+        except Exception as e:
+            await db.rollback()
+            print(f"❌ Extraction job {job_id} failed: {type(e).__name__}")
+            await job_worker.retry_or_fail(
+                job_id,
+                type(e).__name__,
+                expected_lease_token=lease_token,
+            )
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
@@ -766,6 +1020,10 @@ async def get_job_status(
         message=job.message,
         recipe_id=job.recipe_id,
         error_message=job.error_message,
+        error_code=job.error_code,
+        attempt_count=job.attempt_count,
+        max_attempts=job.max_attempts,
+        next_attempt_at=job.next_attempt_at,
         low_confidence=job.low_confidence or False,
         confidence_warning=job.confidence_warning
     )
@@ -784,15 +1042,16 @@ async def cancel_job(
     and avoid saving the recipe if cancelled.
     """
     result = await db.execute(
-        select(ExtractionJob).where(ExtractionJob.id == job_id)
+        select(ExtractionJob)
+        .where(ExtractionJob.id == job_id)
+        .with_for_update()
     )
     job = result.scalar_one_or_none()
     
     if not await _user_can_access_job(db, job, user):
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # Only allow cancellation of processing jobs
-    if job.status not in ["processing", "pending"]:
+    if job.status not in ACTIVE_JOB_STATUSES:
         raise HTTPException(
             status_code=400, 
             detail=f"Cannot cancel job with status '{job.status}'"
@@ -802,6 +1061,10 @@ async def cancel_job(
     job.status = "cancelled"
     job.current_step = "cancelled"
     job.message = "Extraction cancelled by user"
+    job.completed_at = datetime.now(timezone.utc)
+    job.next_attempt_at = None
+    job.lease_token = None
+    job.leased_until = None
     job.updated_at = datetime.utcnow()
     await db.commit()
     
@@ -837,7 +1100,10 @@ class ReExtractAsyncRequest(BaseModel):
 async def start_re_extraction_job(
     recipe_id: UUID,
     request: ReExtractAsyncRequest,
-    background_tasks: BackgroundTasks,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", min_length=1, max_length=128),
+    ] = None,
     db: AsyncSession = Depends(get_db),
     user: ClerkUser = Depends(get_current_user),
 ):
@@ -870,12 +1136,38 @@ async def start_re_extraction_job(
             status_code=400,
             detail="Cannot re-extract manual recipes. Please edit them directly."
         )
-    
-    # Check for existing re-extraction job for this recipe from this user
+
+    idempotency_key = _normalized_idempotency_key(idempotency_key)
+    if idempotency_key:
+        idempotent_result = await db.execute(
+            select(ExtractionJob).where(
+                ExtractionJob.user_id == user.id,
+                ExtractionJob.idempotency_key == idempotency_key,
+            )
+        )
+        idempotent_job = idempotent_result.scalar_one_or_none()
+        if idempotent_job:
+            _validate_idempotent_job(
+                idempotent_job,
+                job_kind="reextract",
+                url=recipe.source_url,
+                location=request.location,
+                notes="",
+                is_public=recipe.is_public,
+                target_recipe_id=recipe_id,
+            )
+            return {
+                "job_id": str(idempotent_job.id),
+                "status": idempotent_job.status,
+                "recipe_id": str(recipe_id),
+                "is_existing": True,
+            }
+
     job_result = await db.execute(
         select(ExtractionJob)
         .where(
-            ExtractionJob.url == f"re-extract:{recipe_id}",
+            ExtractionJob.target_recipe_id == recipe_id,
+            ExtractionJob.job_kind == "reextract",
             ExtractionJob.user_id == user.id,
         )
         .order_by(ExtractionJob.created_at.desc())
@@ -884,48 +1176,110 @@ async def start_re_extraction_job(
     existing_job = job_result.scalar_one_or_none()
     
     if existing_job:
-        if existing_job.status == "processing":
+        if existing_job.status in ACTIVE_JOB_STATUSES:
+            _require_matching_active_job(
+                existing_job,
+                job_kind="reextract",
+                url=recipe.source_url,
+                location=request.location,
+                notes="",
+                is_public=recipe.is_public,
+                target_recipe_id=recipe_id,
+            )
             return {
                 "job_id": str(existing_job.id),
-                "status": "processing",
+                "status": existing_job.status,
                 "message": "Re-extraction already in progress"
             }
-        # Clean up old job
-        await db.delete(existing_job)
-        await db.commit()
     
     # Create new job record
-    job_id = str(uuid4())
+    job_id = uuid4()
     
     job = ExtractionJob(
         id=job_id,
-        url=f"re-extract:{recipe_id}",  # Special URL format for re-extraction
+        url=recipe.source_url,
         user_id=user.id,
         location=request.location,
         notes="",
-        status="processing",
+        status="queued",
+        job_kind="reextract",
+        target_recipe_id=recipe_id,
+        requested_display_name=user.display_name,
+        requested_is_public=recipe.is_public,
+        idempotency_key=idempotency_key,
         progress=0,
-        current_step="initializing",
-        message="Starting re-extraction..."
+        current_step="queued",
+        message="Queued for re-extraction",
+        max_attempts=settings.job_max_attempts,
+        next_attempt_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=settings.job_expiry_hours),
     )
-    
-    db.add(job)
-    await db.commit()
-    
-    # Start background task
-    background_tasks.add_task(
-        run_re_extraction_job,
-        job_id=job_id,
-        recipe_id=str(recipe_id),
-        source_url=recipe.source_url,
-        location=request.location,
-        user_id=user.id,
-    )
+
+    try:
+        db.add(job)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        if idempotency_key:
+            idempotent_result = await db.execute(
+                select(ExtractionJob).where(
+                    ExtractionJob.user_id == user.id,
+                    ExtractionJob.idempotency_key == idempotency_key,
+                )
+            )
+            idempotent_job = idempotent_result.scalar_one_or_none()
+            if idempotent_job:
+                _validate_idempotent_job(
+                    idempotent_job,
+                    job_kind="reextract",
+                    url=recipe.source_url,
+                    location=request.location,
+                    notes="",
+                    is_public=recipe.is_public,
+                    target_recipe_id=recipe_id,
+                )
+                return {
+                    "job_id": str(idempotent_job.id),
+                    "status": idempotent_job.status,
+                    "recipe_id": str(recipe_id),
+                    "is_existing": True,
+                }
+        race_result = await db.execute(
+            select(ExtractionJob)
+            .where(
+                ExtractionJob.user_id == user.id,
+                ExtractionJob.target_recipe_id == recipe_id,
+                ExtractionJob.job_kind == "reextract",
+                ExtractionJob.status.in_(tuple(ACTIVE_JOB_STATUSES)),
+            )
+            .order_by(ExtractionJob.created_at.desc())
+            .limit(1)
+        )
+        raced_job = race_result.scalar_one_or_none()
+        if not raced_job:
+            raise
+        _require_matching_active_job(
+            raced_job,
+            job_kind="reextract",
+            url=recipe.source_url,
+            location=request.location,
+            notes="",
+            is_public=recipe.is_public,
+            target_recipe_id=recipe_id,
+        )
+        return {
+            "job_id": str(raced_job.id),
+            "status": raced_job.status,
+            "message": "Re-extraction already in progress",
+            "recipe_id": str(recipe_id),
+        }
+
+    job_worker.wake()
     
     return {
-        "job_id": job_id,
-        "status": "processing",
-        "message": "Re-extraction started",
+        "job_id": str(job_id),
+        "status": "queued",
+        "message": "Re-extraction queued",
         "recipe_id": str(recipe_id)
     }
 
@@ -936,6 +1290,7 @@ async def run_re_extraction_job(
     source_url: str,
     location: str,
     user_id: str,
+    lease_token: str | None = None,
 ):
     """Background task to run re-extraction and update existing recipe."""
     from app.db.database import AsyncSessionLocal
@@ -945,15 +1300,25 @@ async def run_re_extraction_job(
             # Update progress callback
             async def update_progress(progress):
                 job_result = await db.execute(
-                    select(ExtractionJob).where(ExtractionJob.id == job_id)
+                    select(ExtractionJob)
+                    .where(
+                        ExtractionJob.id == job_id,
+                        ExtractionJob.lease_token == lease_token,
+                    )
+                    .execution_options(populate_existing=True)
                 )
                 job = job_result.scalar_one_or_none()
-                if job:
-                    job.progress = progress.progress
-                    job.current_step = progress.step
-                    job.message = progress.message
-                    job.updated_at = datetime.utcnow()
-                    await db.commit()
+                if not job or job.status == "cancelled":
+                    raise ExtractionJobCancelled
+                job.progress = progress.progress
+                job.current_step = progress.step
+                job.message = progress.message
+                job.heartbeat_at = datetime.now(timezone.utc)
+                job.leased_until = datetime.now(timezone.utc) + timedelta(
+                    seconds=settings.job_lease_seconds
+                )
+                job.updated_at = datetime.now(timezone.utc)
+                await db.commit()
             
             # Get the existing recipe
             recipe_result = await db.execute(
@@ -1002,12 +1367,20 @@ async def run_re_extraction_job(
             
             # Get job record
             job_result = await db.execute(
-                select(ExtractionJob).where(ExtractionJob.id == job_id)
+                select(ExtractionJob)
+                .where(
+                    ExtractionJob.id == job_id,
+                    ExtractionJob.lease_token == lease_token,
+                )
+                .execution_options(populate_existing=True)
             )
             job = job_result.scalar_one_or_none()
             
             if not job:
                 print(f"❌ Re-extraction job {job_id} not found")
+                return
+
+            if job.status == "cancelled":
                 return
             
             if result.success:
@@ -1069,6 +1442,19 @@ async def run_re_extraction_job(
                         if "media" in final_extracted:
                             final_extracted["media"] = dict(final_extracted.get("media", {}))
                             final_extracted["media"]["thumbnail"] = s3_url
+
+                terminal_job_result = await db.execute(
+                    select(ExtractionJob)
+                    .where(
+                        ExtractionJob.id == job_id,
+                        ExtractionJob.lease_token == lease_token,
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                job = terminal_job_result.scalar_one_or_none()
+                if not job:
+                    raise ExtractionJobCancelled
                 
                 # Now apply ALL changes to the recipe object at once
                 print(f"🔵 Final extracted has lowConfidence = {final_extracted.get('lowConfidence')}")
@@ -1084,23 +1470,13 @@ async def run_re_extraction_job(
                 # Mark as modified for SQLAlchemy
                 flag_modified(recipe, 'extracted')
                 
-                # SINGLE COMMIT for recipe + version together
-                await db.commit()
-                print(f"🟣 After SINGLE commit, lowConfidence = {recipe.extracted.get('lowConfidence')}")
-                
-                # Update job as completed
-                # Set completion message based on confidence
                 if result.low_confidence:
                     completion_msg = "Recipe re-extracted - please review for accuracy"
                 else:
                     completion_msg = "Recipe re-extracted successfully!"
-                
-                await update_progress(ExtractionProgress(
-                    step="complete",
-                    progress=100,
-                    message=completion_msg
-                ))
-                
+
+                # Recipe, version snapshot, and terminal job transition commit
+                # atomically so stale recovery cannot create another version.
                 job.status = "completed"
                 job.progress = 100
                 job.current_step = "complete"
@@ -1109,30 +1485,45 @@ async def run_re_extraction_job(
                 job.completed_at = datetime.utcnow()
                 job.low_confidence = result.low_confidence
                 job.confidence_warning = result.confidence_warning
+                job.lease_token = None
+                job.leased_until = None
+                job.updated_at = datetime.now(timezone.utc)
+                await db.commit()
+                print(f"🟣 After SINGLE commit, lowConfidence = {recipe.extracted.get('lowConfidence')}")
+                return
             else:
-                # Update job as failed
-                job.status = "failed"
-                job.current_step = "error"
                 # Use friendly error if available, otherwise raw error
                 friendly_msg = result.friendly_error or result.error or "Re-extraction failed"
-                job.message = friendly_msg
                 job.error_message = friendly_msg  # Show friendly message to user
-            
-            job.updated_at = datetime.utcnow()
-            await db.commit()
-            
-        except Exception as e:
-            print(f"❌ Re-extraction job {job_id} failed: {e}")
-            job_result = await db.execute(
-                select(ExtractionJob).where(ExtractionJob.id == job_id)
-            )
-            job = job_result.scalar_one_or_none()
-            if job:
+                error_code = result.error_code or "REEXTRACTION_FAILED"
+                job.error_code = error_code
+                if should_retry_extraction_error(error_code):
+                    await db.commit()
+                    await job_worker.retry_or_fail(
+                        job_id,
+                        error_code,
+                        expected_lease_token=lease_token,
+                    )
+                    return
                 job.status = "failed"
-                job.error_message = str(e)
-                job.message = f"Error: {str(e)}"
-                job.updated_at = datetime.utcnow()
+                job.current_step = "error"
+                job.message = friendly_msg
+                job.completed_at = datetime.now(timezone.utc)
+                job.lease_token = None
+                job.leased_until = None
+                job.updated_at = datetime.now(timezone.utc)
                 await db.commit()
+            
+        except ExtractionJobCancelled:
+            await db.rollback()
+        except Exception as e:
+            await db.rollback()
+            print(f"❌ Re-extraction job {job_id} failed: {type(e).__name__}")
+            await job_worker.retry_or_fail(
+                job_id,
+                type(e).__name__,
+                expected_lease_token=lease_token,
+            )
 
 
 # ============================================================================

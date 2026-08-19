@@ -51,7 +51,11 @@ class Recipe(Base):
     total_minutes = Column(Integer, nullable=True, index=True)
     
     # Relationship to extraction jobs
-    extraction_jobs = relationship("ExtractionJob", back_populates="recipe")
+    extraction_jobs = relationship(
+        "ExtractionJob",
+        back_populates="recipe",
+        foreign_keys="ExtractionJob.recipe_id",
+    )
     
     def __repr__(self):
         title = self.extracted.get("title", "Untitled") if self.extracted else "Untitled"
@@ -177,13 +181,32 @@ class ExtractionJob(Base):
     user_id = Column(String(64), nullable=True, index=True)
     location = Column(Text, nullable=False, default="Guam")
     notes = Column(Text, nullable=False, default="")
-    status = Column(String(16), nullable=False, default="processing")  # processing|completed|failed
+    status = Column(String(16), nullable=False, default="queued", server_default="queued")
+    job_kind = Column(String(16), nullable=False, default="extract", server_default="extract")
+    requested_is_public = Column(Boolean, nullable=False, default=False, server_default="false")
+    requested_display_name = Column(
+        String(100), nullable=False, default="A chef", server_default="A chef"
+    )
+    target_recipe_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("recipes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    idempotency_key = Column(String(128), nullable=True)
     progress = Column(Integer, nullable=False, default=0)  # 0-100
     current_step = Column(String(32), nullable=False, default="initializing")
     message = Column(Text, nullable=False, default="Starting extraction...")
     estimated_duration = Column(Integer, nullable=False, default=60)  # seconds
     recipe_id = Column(UUID(as_uuid=True), ForeignKey("recipes.id"), nullable=True)
     error_message = Column(Text, nullable=True)
+    error_code = Column(String(64), nullable=True)
+    lease_token = Column(String(64), nullable=True)
+    leased_until = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts = Column(Integer, nullable=False, default=3, server_default="3")
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
     low_confidence = Column(Boolean, nullable=True, default=False)  # True if extraction quality is uncertain
     confidence_warning = Column(Text, nullable=True)  # Warning message for low confidence
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -191,8 +214,8 @@ class ExtractionJob(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Relationship to recipe
-    recipe = relationship("Recipe", back_populates="extraction_jobs")
+    recipe = relationship("Recipe", back_populates="extraction_jobs", foreign_keys=[recipe_id])
+    target_recipe = relationship("Recipe", foreign_keys=[target_recipe_id])
     
     def __repr__(self):
         return f"<ExtractionJob {self.id}: {self.status}>"
-

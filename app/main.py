@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.job_worker import job_worker
 from app.routers import (
     chat_router,
     collections_router,
@@ -87,9 +88,11 @@ async def startup():
     print(f"🚀 {settings.api_title} v{settings.api_version}")
     print(f"📍 Environment: {settings.environment}")
     print("📚 Docs: http://localhost:8000/docs")
+    await job_worker.start()
 
 
 @app.on_event("shutdown")
 async def shutdown():
     """Run on application shutdown."""
+    await job_worker.stop()
     print("👋 Shutting down Recipe Extractor API")
