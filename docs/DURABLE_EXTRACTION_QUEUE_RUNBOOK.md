@@ -48,6 +48,8 @@ failure from silently losing a user's work.
 
 3. Run the same command once more. The migration is idempotent and the second
    run must also succeed.
+   - Environments that skipped migration 015 receive `user_id`, completed-job
+     owner backfill, and ownership lookup indexes in the same transaction.
    - Older schemas' obsolete global `UNIQUE(url)` constraint is removed and
      replaced by the partial per-user active-job invariant created below.
    - Unfinished legacy re-extractions are recoverable because their request
@@ -55,6 +57,9 @@ failure from silently losing a user's work.
    - A legacy re-extraction whose target recipe was already deleted is preserved
      as failed with `MIGRATION_TARGET_MISSING`; the new foreign key remains
      `NULL` and no impossible work is queued.
+   - A legacy re-extraction whose target recipe has no owner is preserved as
+     failed with `MIGRATION_OWNER_MISSING`; unreachable user-less work is never
+     queued.
    - Unfinished regular legacy extractions are marked failed with
      `MIGRATION_RETRY_REQUIRED`; their old process never persisted privacy and
      attribution choices, so users must retry rather than receive a recipe
@@ -66,7 +71,7 @@ failure from silently losing a user's work.
    FROM information_schema.columns
    WHERE table_name = 'extraction_jobs'
      AND column_name IN (
-       'job_kind', 'idempotency_key', 'lease_token', 'leased_until',
+       'user_id', 'job_kind', 'idempotency_key', 'lease_token', 'leased_until',
        'attempt_count', 'next_attempt_at', 'expires_at'
      )
    ORDER BY column_name;
@@ -77,6 +82,9 @@ failure from silently losing a user's work.
      AND indexname IN (
        'uq_extraction_jobs_active_user_url',
        'uq_extraction_jobs_user_idempotency',
+       'ix_extraction_jobs_user_id',
+       'ix_extraction_jobs_url',
+       'ix_extraction_jobs_user_url_status',
        'ix_extraction_jobs_claimable',
        'ix_extraction_jobs_lease'
      )

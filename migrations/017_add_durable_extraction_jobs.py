@@ -22,6 +22,7 @@ async def run_migration():
 
         await conn.execute(text("""
             ALTER TABLE extraction_jobs
+                ADD COLUMN IF NOT EXISTS user_id VARCHAR(64),
                 ADD COLUMN IF NOT EXISTS job_kind VARCHAR(16) NOT NULL DEFAULT 'extract',
                 ADD COLUMN IF NOT EXISTS requested_is_public BOOLEAN NOT NULL DEFAULT FALSE,
                 ADD COLUMN IF NOT EXISTS requested_display_name VARCHAR(100) NOT NULL DEFAULT 'A chef',
@@ -56,6 +57,18 @@ async def run_migration():
                 extraction_jobs_url_key
         """))
 
+        # Migration 017 is a deploy precondition, so make it self-contained for
+        # older environments where migration 015 was skipped. Completed jobs
+        # inherit ownership from the recipe they created.
+        await conn.execute(text("""
+            UPDATE extraction_jobs AS job
+            SET user_id = recipe.user_id
+            FROM recipes AS recipe
+            WHERE job.recipe_id = recipe.id
+              AND job.user_id IS NULL
+              AND recipe.user_id IS NOT NULL
+        """))
+
         if is_legacy_upgrade:
             await conn.execute(text("""
                 UPDATE extraction_jobs
@@ -79,7 +92,8 @@ async def run_migration():
                 UPDATE extraction_jobs AS job
                 SET url = recipe.source_url,
                     requested_is_public = recipe.is_public,
-                    requested_display_name = COALESCE(recipe.extractor_display_name, 'A chef')
+                    requested_display_name = COALESCE(recipe.extractor_display_name, 'A chef'),
+                    user_id = COALESCE(job.user_id, recipe.user_id)
                 FROM recipes AS recipe
                 WHERE job.job_kind = 'reextract'
                   AND job.target_recipe_id = recipe.id
@@ -128,6 +142,26 @@ async def run_migration():
                   AND recipe_id IS NULL
                   AND job_kind = 'reextract'
                   AND target_recipe_id IS NOT NULL
+                  AND user_id IS NOT NULL
+            """))
+
+            # A target recipe without an owner cannot produce a user-owned job
+            # that any client could poll. Preserve it as an explicit terminal
+            # audit row instead of queueing unreachable work.
+            await conn.execute(text("""
+                UPDATE extraction_jobs
+                SET status = 'failed',
+                    current_step = 'error',
+                    message = 'Please start a new extraction after the queue upgrade',
+                    error_message = 'Please start a new extraction after the queue upgrade',
+                    error_code = 'MIGRATION_OWNER_MISSING',
+                    completed_at = NOW(),
+                    next_attempt_at = NULL
+                WHERE status IN ('queued', 'processing', 'pending', 'claimed')
+                  AND recipe_id IS NULL
+                  AND job_kind = 'reextract'
+                  AND target_recipe_id IS NOT NULL
+                  AND user_id IS NULL
             """))
 
             # Regular legacy jobs did not persist visibility/display-name inputs.
@@ -167,6 +201,18 @@ async def run_migration():
                 WHERE job.id = ranked.id AND ranked.row_number > 1
             """))
 
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_extraction_jobs_user_id
+            ON extraction_jobs (user_id)
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_extraction_jobs_url
+            ON extraction_jobs (url)
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_extraction_jobs_user_url_status
+            ON extraction_jobs (user_id, url, status)
+        """))
         await conn.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS uq_extraction_jobs_active_user_url
             ON extraction_jobs (
