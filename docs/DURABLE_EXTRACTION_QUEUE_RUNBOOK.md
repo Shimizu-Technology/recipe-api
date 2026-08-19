@@ -48,6 +48,8 @@ failure from silently losing a user's work.
 
 3. Run the same command once more. The migration is idempotent and the second
    run must also succeed.
+   - Older schemas' obsolete global `UNIQUE(url)` constraint is removed and
+     replaced by the partial per-user active-job invariant created below.
    - Unfinished legacy re-extractions are recoverable because their request
      fields can be rebuilt from the target recipe.
    - A legacy re-extraction whose target recipe was already deleted is preserved

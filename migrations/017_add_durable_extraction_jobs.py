@@ -40,6 +40,22 @@ async def run_migration():
             ALTER TABLE extraction_jobs ALTER COLUMN status SET DEFAULT 'queued'
         """))
 
+        # Older production schemas used either Drizzle's `_unique` name or
+        # PostgreSQL's `_key` name for a global UNIQUE(url) constraint. That
+        # invariant prevents per-user jobs and also blocks the legacy
+        # re-extraction URL rewrite below. Replace only these known obsolete
+        # variants; the partial per-user active-job invariant is added later.
+        await conn.execute(text("""
+            ALTER TABLE extraction_jobs
+                DROP CONSTRAINT IF EXISTS extraction_jobs_url_unique,
+                DROP CONSTRAINT IF EXISTS extraction_jobs_url_key
+        """))
+        await conn.execute(text("""
+            DROP INDEX IF EXISTS
+                extraction_jobs_url_unique,
+                extraction_jobs_url_key
+        """))
+
         if is_legacy_upgrade:
             await conn.execute(text("""
                 UPDATE extraction_jobs
