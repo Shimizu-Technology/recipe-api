@@ -77,7 +77,7 @@ async def run_migration():
                     current_step = 'complete',
                     message = 'Recipe extracted successfully!',
                     completed_at = COALESCE(completed_at, NOW())
-                WHERE status IN ('processing', 'pending', 'claimed')
+                WHERE status IN ('queued', 'processing', 'pending', 'claimed')
                   AND recipe_id IS NOT NULL
             """))
 
@@ -92,7 +92,7 @@ async def run_migration():
                     error_code = 'MIGRATION_TARGET_MISSING',
                     completed_at = NOW(),
                     next_attempt_at = NULL
-                WHERE status IN ('processing', 'pending', 'claimed')
+                WHERE status IN ('queued', 'processing', 'pending', 'claimed')
                   AND recipe_id IS NULL
                   AND job_kind = 'reextract'
                   AND target_recipe_id IS NULL
@@ -108,7 +108,7 @@ async def run_migration():
                     leased_until = NULL,
                     next_attempt_at = NOW(),
                     expires_at = COALESCE(expires_at, NOW() + INTERVAL '24 hours')
-                WHERE status IN ('processing', 'pending', 'claimed')
+                WHERE status IN ('queued', 'processing', 'pending', 'claimed')
                   AND recipe_id IS NULL
                   AND job_kind = 'reextract'
                   AND target_recipe_id IS NOT NULL
@@ -126,7 +126,7 @@ async def run_migration():
                     error_code = 'MIGRATION_RETRY_REQUIRED',
                     completed_at = NOW(),
                     next_attempt_at = NULL
-                WHERE status IN ('processing', 'pending', 'claimed')
+                WHERE status IN ('queued', 'processing', 'pending', 'claimed')
                   AND recipe_id IS NULL
                   AND job_kind = 'extract'
             """))
