@@ -127,9 +127,17 @@ def test_claim_query_uses_postgres_skip_locked_and_stale_lease_recovery():
 def test_worker_schema_preflight_requires_migration_017_columns():
     assert missing_worker_columns({"id", "job_kind", "lease_token"}) == [
         "attempt_count",
+        "error_code",
         "expires_at",
+        "heartbeat_at",
         "idempotency_key",
         "leased_until",
+        "max_attempts",
+        "next_attempt_at",
+        "requested_display_name",
+        "requested_is_public",
+        "target_recipe_id",
+        "user_id",
     ]
     assert missing_worker_columns(
         {
@@ -137,7 +145,15 @@ def test_worker_schema_preflight_requires_migration_017_columns():
             "lease_token",
             "leased_until",
             "attempt_count",
+            "error_code",
             "expires_at",
+            "heartbeat_at",
             "idempotency_key",
+            "max_attempts",
+            "next_attempt_at",
+            "requested_display_name",
+            "requested_is_public",
+            "target_recipe_id",
+            "user_id",
         }
     ) == []

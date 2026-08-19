@@ -26,10 +26,18 @@ RETRYABLE_EXTRACTION_ERROR_CODES = frozenset(
 )
 REQUIRED_JOB_COLUMNS = frozenset(
     {
+        "user_id",
         "job_kind",
+        "requested_is_public",
+        "requested_display_name",
+        "target_recipe_id",
+        "error_code",
         "lease_token",
         "leased_until",
+        "heartbeat_at",
         "attempt_count",
+        "max_attempts",
+        "next_attempt_at",
         "expires_at",
         "idempotency_key",
     }
