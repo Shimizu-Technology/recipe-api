@@ -50,6 +50,9 @@ failure from silently losing a user's work.
    run must also succeed.
    - Unfinished legacy re-extractions are recoverable because their request
      fields can be rebuilt from the target recipe.
+   - A legacy re-extraction whose target recipe was already deleted is preserved
+     as failed with `MIGRATION_TARGET_MISSING`; the new foreign key remains
+     `NULL` and no impossible work is queued.
    - Unfinished regular legacy extractions are marked failed with
      `MIGRATION_RETRY_REQUIRED`; their old process never persisted privacy and
      attribution choices, so users must retry rather than receive a recipe

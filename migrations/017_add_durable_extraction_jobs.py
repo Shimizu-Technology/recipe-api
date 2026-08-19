@@ -43,9 +43,21 @@ async def run_migration():
         if is_legacy_upgrade:
             await conn.execute(text("""
                 UPDATE extraction_jobs
-                SET job_kind = 'reextract',
-                    target_recipe_id = SUBSTRING(url FROM 're-extract:([0-9a-fA-F-]{36})')::uuid
+                SET job_kind = 'reextract'
                 WHERE url ~ '^re-extract:[0-9a-fA-F-]{36}$'
+            """))
+            # Historical re-extractions can outlive a recipe that was deleted.
+            # Join through recipes before assigning the new foreign key so those
+            # orphaned audit rows remain valid with a NULL target.
+            await conn.execute(text("""
+                UPDATE extraction_jobs AS job
+                SET target_recipe_id = recipe.id
+                FROM recipes AS recipe
+                WHERE job.job_kind = 'reextract'
+                  AND job.url ~ '^re-extract:[0-9a-fA-F-]{36}$'
+                  AND SUBSTRING(
+                      job.url FROM 're-extract:([0-9a-fA-F-]{36})'
+                  )::uuid = recipe.id
             """))
             await conn.execute(text("""
                 UPDATE extraction_jobs AS job
@@ -69,6 +81,23 @@ async def run_migration():
                   AND recipe_id IS NOT NULL
             """))
 
+            # An active re-extraction whose target recipe was deleted cannot be
+            # recovered. Preserve the row and ask the client to start fresh.
+            await conn.execute(text("""
+                UPDATE extraction_jobs
+                SET status = 'failed',
+                    current_step = 'error',
+                    message = 'The original recipe no longer exists; start a new extraction',
+                    error_message = 'The original recipe no longer exists; start a new extraction',
+                    error_code = 'MIGRATION_TARGET_MISSING',
+                    completed_at = NOW(),
+                    next_attempt_at = NULL
+                WHERE status IN ('processing', 'pending', 'claimed')
+                  AND recipe_id IS NULL
+                  AND job_kind = 'reextract'
+                  AND target_recipe_id IS NULL
+            """))
+
             # Re-extraction payloads can be reconstructed from the target recipe.
             await conn.execute(text("""
                 UPDATE extraction_jobs
@@ -82,6 +111,7 @@ async def run_migration():
                 WHERE status IN ('processing', 'pending', 'claimed')
                   AND recipe_id IS NULL
                   AND job_kind = 'reextract'
+                  AND target_recipe_id IS NOT NULL
             """))
 
             # Regular legacy jobs did not persist visibility/display-name inputs.
